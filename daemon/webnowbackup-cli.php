@@ -63,6 +63,11 @@ switch ($cmd) {
         WNBEngine::recoverStale();
         WNBEngine::runDueJobs();
         WNBEngine::cleanup();
+        try {
+            WNBEngine::healthCheck();
+        } catch (Throwable $e) {
+            // Giám sát không được làm hỏng lượt cron.
+        }
         WNBStorage::unlock($lock);
         foreach (WNBStorage::read('queue') as $t) {
             if ($t['status'] === 'pending') {

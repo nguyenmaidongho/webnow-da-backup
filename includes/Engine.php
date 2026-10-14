@@ -357,22 +357,32 @@ final class WNBEngine
         if (!$isLocal && !WNBRclone::installed()) {
             throw new WNBError('Chưa cài rclone nên không sao lưu lên cloud được.');
         }
+        // Chế độ "Nén": home và database được nén rồi đẩy thẳng lên cloud theo luồng,
+        // local chỉ giữ vài file cấu hình nhỏ -> vẫn sao lưu được khi ổ đĩa máy chủ gần đầy.
+        $archive = !$isLocal && WNBRclone::destFormat($dest) === 'archive';
         $root = $isLocal ? rtrim($dest['path'], '/') : self::stagingRoot();
         self::mkdirSecure($root, 0711);
 
         // Không sao lưu khi kho gần đầy: tránh làm đầy ổ đĩa của máy chủ.
-        $minFree = (float)WNBStorage::settings()['min_free_gb'];
+        $minFree = $archive ? self::ARCHIVE_MIN_FREE_GB : (float)WNBStorage::settings()['min_free_gb'];
         $free = @disk_free_space($root);
         if ($minFree > 0 && $free !== false && $free / 1073741824 < $minFree) {
-            throw new WNBError('Kho chỉ còn {free} GB trống (tối thiểu {min} GB). Hãy dọn bớt hoặc giảm số bản giữ lại.', ['free' => round($free / 1073741824, 1), 'min' => $minFree]);
+            throw new WNBError('Kho chỉ còn {free} GB trống (tối thiểu {min} GB). Hãy dọn bớt hoặc giảm số bản giữ lại.', ['free' => round($free / 1073741824, 2), 'min' => $minFree]);
+        }
+        // Hết inode thì vẫn báo "No space left on device" dù còn nhiều GB trống.
+        $inodes = self::freeInodes($root);
+        if ($inodes !== null && $inodes < ($archive ? self::ARCHIVE_MIN_FREE_INODES : self::MIN_FREE_INODES)) {
+            throw new WNBError('Ổ đĩa chứa {path} gần hết inode (chỉ còn {n} inode trống) nên không tạo thêm file được. Hãy xóa bớt file nhỏ (bản sao lưu cũ, session, mail queue) hoặc chuyển thư mục lưu trữ sang ổ khác.', ['path' => $root, 'n' => $inodes]);
         }
 
         self::mkdirSecure($root . '/' . $u, 0700);
         $work = $root . '/' . $u . '/' . $id;
-        foreach (['', '/config', '/databases', '/emails', '/dns', '/cron', '/homedir'] as $sub) {
+        foreach (array_merge(['', '/config', '/emails', '/dns', '/cron'], $archive ? [] : ['/databases', '/homedir']) as $sub) {
             self::mkdirSecure($work . $sub, 0700);
         }
         $prefix = WNBShell::lowPriorityPrefix();
+        $remote = $isLocal ? '' : WNBRclone::join(WNBRclone::base($dest), $u, $id);
+        $homeArchived = false;
 
         try {
             // 1. Cấu hình DirectAdmin của user (user.conf, domains, crontab.conf...)
@@ -404,20 +414,27 @@ final class WNBEngine
                     $cnf = WNBDirectAdmin::mysqlDefaultsFile();
                     foreach ($acc['databases'] as $db) {
                         $file = $work . '/databases/' . $db . '.sql.gz';
-                        $code = WNBShell::bash(sprintf(
-                            '%s%s --defaults-extra-file=%s --single-transaction --quick --routines --triggers --events --max-allowed-packet=1G %s | gzip -c > %s',
+                        $dump = sprintf(
+                            '%s%s --defaults-extra-file=%s --single-transaction --quick --routines --triggers --events --max-allowed-packet=1G %s | %s',
                             $prefix,
                             escapeshellarg($mysqldump ?: 'mysqldump'),
                             escapeshellarg($cnf),
                             escapeshellarg($db),
-                            escapeshellarg($file)
-                        ), $out);
+                            $prefix . self::compressor()
+                        );
+                        // Bản nén: dump đi thẳng lên cloud, không ghi ra đĩa local.
+                        $code = WNBShell::bash($dump . ' | ' . ($archive
+                            ? WNBRclone::cmd('rcat ' . escapeshellarg(WNBRclone::join($remote, 'databases', $db . '.sql.gz')) . self::STREAM_FLAGS, true)
+                            : 'cat > ' . escapeshellarg($file)), $out);
                         if ($code === 0) {
                             $dumped[] = $db;
                         } elseif (self::outOfSpace($out)) {
                             throw self::diskFullError($root);
                         } else {
                             @unlink($file);
+                            if ($archive) {
+                                WNBShell::run(WNBRclone::cmd('deletefile ' . escapeshellarg(WNBRclone::join($remote, 'databases', $db . '.sql.gz'))));
+                            }
                             $warnings[] = WNBLang::msg('Dump database {db} thất bại: {detail}', ['db' => $db, 'detail' => WNBShell::tail($out, 2)]);
                         }
                     }
@@ -445,13 +462,16 @@ final class WNBEngine
                 }
             }
 
-            // 5. Home directory, incremental bằng hardlink với bản trước trên cùng kho local
-            self::step($task, 35, 'Đồng bộ thư mục home');
+            // 5. Home directory: kho local incremental bằng hardlink; kho cloud "Nén" thì nén thẳng lên cloud.
+            self::step($task, 35, $archive ? 'Nén thư mục home lên {dest}' : 'Đồng bộ thư mục home', ['dest' => $dest['name']]);
             $pw = WNBDirectAdmin::passwd($u);
             $home = $pw['home'] ?? '';
             $prev = $isLocal ? self::latestLocalBackup($u, $dest['id']) : null;
             if ($home === '' || !is_dir($home)) {
                 $warnings[] = WNBLang::msg('Không tìm thấy thư mục home.');
+            } elseif ($archive) {
+                self::streamHomeArchive($home, $remote, $work . '.index', $prefix, $warnings);
+                $homeArchived = true;
             } else {
                 // Không giữ chủ sở hữu (-o/-g): file sao lưu thuộc root nên KHÔNG bị tính vào quota của khách
                 // khi /backup nằm cùng phân vùng có bật quota. Khi khôi phục, dữ liệu được chown lại cho user.
@@ -475,6 +495,9 @@ final class WNBEngine
 
             // 6. Manifest + dung lượng thực tế (du 2 thư mục: phần dùng chung đếm 1 lần -> dòng 2 là dữ liệu mới)
             $fullMb = self::duMb($work)[0] ?? 0;
+            if ($archive) {
+                $fullMb = round($fullMb + self::remoteSizeMb($remote), 1);
+            }
             $newMb = $prev ? (self::duMb($prev['storage_path'], $work)[1] ?? $fullMb) : $fullMb;
             $record = [
                 'id' => $id,
@@ -487,6 +510,8 @@ final class WNBEngine
                 'destination_id' => $dest['id'],
                 'destination_name' => $dest['name'],
                 'destination_type' => $dest['type'],
+                'format' => $archive ? 'archive' : 'folder',
+                'home_archive' => $homeArchived,
                 'job_id' => $task['job_id'],
                 'note' => $task['note'],
                 'databases' => $dumped,
@@ -501,13 +526,11 @@ final class WNBEngine
             ];
             file_put_contents($work . '/manifest.json', json_encode($record, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
 
-            // 7. Đẩy lên cloud
+            // 7. Đẩy lên cloud (chế độ Nén: chỉ còn vài file cấu hình nhỏ)
             if (!$isLocal) {
-                self::step($task, 75, 'Tải lên {dest}', ['dest' => $dest['name']]);
-                $remote = WNBRclone::join(WNBRclone::base($dest), $u, $id);
-                $code = WNBShell::run($prefix . WNBRclone::cmd('copy ' . escapeshellarg($work) . ' ' . escapeshellarg($remote) . ' --transfers 4 --checkers 8 --retries 3', true), $out);
+                self::step($task, 85, 'Tải lên {dest}', ['dest' => $dest['name']]);
+                $code = WNBShell::run($prefix . WNBRclone::cmd('copy ' . escapeshellarg($work) . ' ' . escapeshellarg($remote) . ' --transfers 8 --checkers 16 --retries 3', true), $out);
                 if ($code !== 0) {
-                    WNBShell::run(WNBRclone::cmd('purge ' . escapeshellarg($remote)));
                     throw new WNBError('Tải lên cloud thất bại: {detail}', ['detail' => WNBShell::tail($out, 3)]);
                 }
                 self::rmrf($work);
@@ -515,6 +538,11 @@ final class WNBEngine
             }
         } catch (Throwable $e) {
             self::rmrf($work);
+            @unlink($work . '.index');
+            if ($remote !== '') {
+                // Không để lại bản dở dang trên cloud.
+                WNBShell::run(WNBRclone::cmd('purge ' . escapeshellarg($remote)));
+            }
             throw $e;
         }
 
@@ -535,7 +563,172 @@ final class WNBEngine
         return ['message' => WNBLang::msg($key, $vars), 'warnings' => $warnings];
     }
 
-    private const DISK_FULL = 'Ổ đĩa chứa {path} đã đầy (còn {free} GB trống). Hãy dọn bớt, giảm số bản giữ lại hoặc chuyển thư mục lưu trữ sang ổ lớn hơn trong Cài đặt.';
+    private const DISK_FULL = 'Ổ đĩa chứa {path} đã đầy (còn {free} GB và {inodes} inode trống). Hãy dọn bớt, giảm số bản giữ lại hoặc chuyển thư mục lưu trữ sang ổ lớn hơn trong Cài đặt.';
+    /** Dưới mức này thì không bắt đầu sao lưu (mỗi tài khoản có thể cần hàng chục nghìn file). */
+    private const MIN_FREE_INODES = 50000;
+
+    /** Chế độ Nén chỉ ghi vài file cấu hình ra đĩa local nên chỉ cần rất ít chỗ trống. */
+    private const ARCHIVE_MIN_FREE_GB = 0.2;
+    private const ARCHIVE_MIN_FREE_INODES = 2000;
+    /** Tải lên theo luồng: chunk 32M cho phép file tới ~320 GB trên S3 (10.000 phần), tốn ~128 MB RAM. */
+    private const STREAM_FLAGS = ' --s3-chunk-size 32M --retries 1 --low-level-retries 10';
+
+    /** pigz (đa luồng) nếu có, không thì gzip mức 4 (nhanh hơn nhiều so với mặc định, file lớn hơn chút ít). */
+    private static function compressor(): string
+    {
+        $pigz = WNBShell::which('pigz');
+        return $pigz !== '' ? escapeshellarg($pigz) . ' -6' : 'gzip -4';
+    }
+
+    /** Mẫu loại trừ trong Cài đặt, dạng của tar (tính từ "./" của home). */
+    private static function tarExcludeArgs(): string
+    {
+        $args = ' --anchored';
+        foreach (preg_split('/\r?\n/', (string)WNBStorage::settings()['excludes']) as $pattern) {
+            $pattern = trim($pattern);
+            if ($pattern !== '' && strpos($pattern, '..') === false) {
+                $args .= ' --exclude=' . escapeshellarg('./' . ltrim($pattern, '/'));
+            }
+        }
+        return $args;
+    }
+
+    /**
+     * Nén home thành homedir.tar.gz và đẩy thẳng lên cloud (tar | gzip | rclone rcat), không ghi bản nén ra đĩa.
+     * Danh sách file (tar -vv) được lưu kèm thành homedir.index.gz để duyệt mà không phải tải bản nén.
+     */
+    private static function streamHomeArchive(string $home, string $remote, string $indexFile, string $prefix, array &$warnings): void
+    {
+        $tar = WNBShell::which('tar') ?: 'tar';
+        WNBShell::bash(sprintf(
+            '%s%s -C %s -cf - --numeric-owner -vv --index-file=%s --quoting-style=literal%s . | %s%s | %s; echo "WNB_PIPE ${PIPESTATUS[*]}"',
+            $prefix,
+            escapeshellarg($tar),
+            escapeshellarg($home),
+            escapeshellarg($indexFile),
+            self::tarExcludeArgs(),
+            $prefix,
+            self::compressor(),
+            WNBRclone::cmd('rcat ' . escapeshellarg(WNBRclone::join($remote, 'homedir.tar.gz')) . self::STREAM_FLAGS, true)
+        ), $out);
+        [$tarCode, $gzCode, $upCode] = self::pipeStatus($out, 3);
+        if ($upCode !== 0) {
+            throw new WNBError('Tải lên cloud thất bại: {detail}', ['detail' => WNBShell::tail($out, 3)]);
+        }
+        if ($gzCode !== 0 || $tarCode > 1) {
+            throw new WNBError('Nén thư mục home thất bại (mã {code}): {detail}', ['code' => $tarCode ?: $gzCode, 'detail' => WNBShell::tail($out, 3)]);
+        }
+        if ($tarCode === 1) {
+            $warnings[] = WNBLang::msg('Một số file không đọc được hoặc thay đổi trong lúc sao lưu: {detail}', ['detail' => WNBShell::tail($out, 2)]);
+        }
+        $code = WNBShell::bash(sprintf('gzip -c %s | %s', escapeshellarg($indexFile), WNBRclone::cmd('rcat ' . escapeshellarg(WNBRclone::join($remote, 'homedir.index.gz')) . self::STREAM_FLAGS)), $out);
+        @unlink($indexFile);
+        if ($code !== 0) {
+            $warnings[] = WNBLang::msg('Không lưu được danh sách file của bản nén (vẫn khôi phục được, nhưng không duyệt từng file được): {detail}', ['detail' => WNBShell::tail($out, 2)]);
+        }
+    }
+
+    /** Đọc dòng "WNB_PIPE a b c" (mã thoát từng lệnh của pipeline) và bỏ nó khỏi $out. */
+    private static function pipeStatus(array &$out, int $n): array
+    {
+        $codes = array_fill(0, $n, 1);
+        foreach ($out as $i => $line) {
+            if (preg_match('/^WNB_PIPE ([\d ]+)$/', trim($line), $m)) {
+                $codes = array_map('intval', explode(' ', trim($m[1])));
+                unset($out[$i]);
+            }
+        }
+        $out = array_values($out);
+        return array_pad(array_slice($codes, 0, $n), $n, 1);
+    }
+
+    private static function remoteSizeMb(string $remote): float
+    {
+        if (WNBShell::run(WNBRclone::cmd('size ' . escapeshellarg($remote) . ' --json'), $out) !== 0) {
+            return 0.0;
+        }
+        $raw = implode("\n", $out);
+        $j = json_decode(substr($raw, (int)strpos($raw, '{')), true);
+        return isset($j['bytes']) ? round($j['bytes'] / 1048576, 1) : 0.0;
+    }
+
+    /**
+     * Đường dẫn local của danh sách file một bản nén (tải từ cloud lần đầu, lưu tạm 1 ngày trong data/cache).
+     */
+    public static function archiveIndex(array $b): string
+    {
+        $dir = WNBStorage::path('cache');
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0700, true);
+        }
+        $file = $dir . '/idx_' . preg_replace('/[^A-Za-z0-9_]/', '', (string)$b['id']) . '.txt';
+        if (is_file($file)) {
+            @touch($file);
+            return $file;
+        }
+        if (WNB::isPreview()) {
+            file_put_contents($file, self::previewIndex(rtrim((string)$b['storage_path'], '/') . '/homedir'));
+            return $file;
+        }
+        if (!WNBRclone::installed()) {
+            throw new WNBError('Chưa cài rclone nên không duyệt được bản sao lưu trên cloud.');
+        }
+        $tmp = $file . '.tmp';
+        $code = WNBShell::bash(sprintf('%s | gzip -dc > %s', WNBRclone::cmd('cat ' . escapeshellarg(WNBRclone::join((string)$b['storage_path'], 'homedir.index.gz')) . ' --contimeout 15s --timeout 120s'), escapeshellarg($tmp)), $out);
+        if ($code !== 0 || !@rename($tmp, $file)) {
+            @unlink($tmp);
+            throw new WNBError('Không đọc được danh sách file của bản sao lưu: {detail}', ['detail' => WNBShell::tail($out, 2)]);
+        }
+        return $file;
+    }
+
+    /** $rel (file hoặc thư mục) có trong bản nén không. */
+    public static function archiveHas(array $b, string $rel): bool
+    {
+        $fp = @fopen(self::archiveIndex($b), 'rb');
+        if (!$fp) {
+            return false;
+        }
+        $prefix = $rel . '/';
+        while (($line = fgets($fp)) !== false) {
+            $e = WNBRclone::parseIndexLine(rtrim($line, "\r\n"));
+            if ($e && ($e['path'] === $rel || strpos($e['path'], $prefix) === 0)) {
+                fclose($fp);
+                return true;
+            }
+        }
+        fclose($fp);
+        return false;
+    }
+
+    /** Preview: dựng danh sách file giống `tar -cvv` từ thư mục demo. */
+    private static function previewIndex(string $dir): string
+    {
+        $out = "drwx------ 0/0 0 2024-05-01 12:00 ./\n";
+        if (!is_dir($dir)) {
+            return $out;
+        }
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+        foreach ($it as $f) {
+            $rel = str_replace('\\', '/', substr($f->getPathname(), strlen($dir) + 1));
+            $date = date('Y-m-d H:i', $f->getMTime());
+            $out .= $f->isDir() ? "drwx------ 0/0 0 $date ./$rel/\n" : sprintf("-rw-r--r-- 0/0 %9d %s ./%s\n", $f->getSize(), $date, $rel);
+        }
+        return $out;
+    }
+
+    /** Số inode còn trống của phân vùng chứa $path (df -Pi); null nếu không xác định (vd btrfs báo 0 inode). */
+    private static function freeInodes(string $path): ?int
+    {
+        if (WNBShell::run('df -Pi ' . escapeshellarg($path), $out) !== 0 || count($out) < 2) {
+            return null;
+        }
+        $f = preg_split('/\s+/', trim((string)end($out)));
+        if (count($f) < 4 || !preg_match('/^\d+$/', $f[1] . $f[3]) || (int)$f[1] === 0) {
+            return null;
+        }
+        return (int)$f[3];
+    }
 
     private static function outOfSpace(array $out): bool
     {
@@ -545,7 +738,8 @@ final class WNBEngine
     private static function diskFullError(string $root): WNBError
     {
         $free = @disk_free_space($root);
-        return new WNBError(self::DISK_FULL, ['path' => $root, 'free' => $free === false ? '?' : round($free / 1073741824, 1)]);
+        $inodes = self::freeInodes($root);
+        return new WNBError(self::DISK_FULL, ['path' => $root, 'free' => $free === false ? '?' : round($free / 1073741824, 1), 'inodes' => $inodes === null ? '?' : $inodes]);
     }
 
     private static function latestLocalBackup(string $u, string $destId): ?array
@@ -632,6 +826,7 @@ final class WNBEngine
             'id' => $id, 'username' => $u, 'reseller' => $acc['creator'], 'owner_key' => WNBDirectAdmin::ownerKey($u), 'domain' => $acc['domain'], 'domains' => $acc['domains'],
             'type' => $task['type'] === 'snapshot' ? 'snapshot' : 'backup',
             'destination_id' => $dest['id'], 'destination_name' => $dest['name'], 'destination_type' => $dest['type'],
+            'format' => WNBRclone::destFormat($dest), 'home_archive' => true,
             'job_id' => $task['job_id'], 'note' => $task['note'],
             'databases' => $acc['databases'], 'emails' => $acc['emails'], 'crons' => $acc['crons'],
             'incremental' => false, 'size_mb' => $size, 'new_mb' => round($size * 0.08, 1),
@@ -675,12 +870,13 @@ final class WNBEngine
 
         $stage = '';
         $src = $b['storage_path'];
+        $archive = ($b['format'] ?? 'folder') === 'archive';
         try {
             if (($b['destination_type'] ?? 'local') !== 'local') {
                 self::step($task, 10, 'Tải dữ liệu cần thiết từ cloud');
                 $stage = self::stagingRoot() . '/restore_' . $task['id'];
                 self::mkdirSecure($stage, 0700);
-                self::fetchRemote($b['storage_path'], $stage, $sel);
+                self::fetchRemote($b['storage_path'], $stage, $sel, $archive);
                 $src = $stage;
             } elseif (!is_dir($src)) {
                 throw new WNBError('Không tìm thấy dữ liệu bản sao lưu trên đĩa.');
@@ -689,13 +885,18 @@ final class WNBEngine
             $homeItems = $sel['home'];
             foreach ($homeItems === [''] ? [] : $sel['emails'] as $email) {
                 [$box, $domain] = explode('@', $email, 2);
-                if (file_exists($src . '/homedir/imap/' . $domain . '/' . $box)) {
-                    $homeItems[] = 'imap/' . $domain . '/' . $box;
+                $rel = 'imap/' . $domain . '/' . $box;
+                if ($archive ? self::archiveHas($b, $rel) : file_exists($src . '/homedir/' . $rel)) {
+                    $homeItems[] = $rel;
                 }
             }
             if ($homeItems) {
                 self::step($task, 35, 'Khôi phục file vào thư mục home');
-                self::restoreHome($u, $src . '/homedir', $homeItems, $task, $warnings);
+                if ($archive) {
+                    self::restoreHomeArchive($u, $b, $homeItems, $warnings);
+                } else {
+                    self::restoreHome($u, $src . '/homedir', $homeItems, $task, $warnings);
+                }
             }
             if ($sel['databases']) {
                 self::step($task, 65, 'Import database');
@@ -759,7 +960,7 @@ final class WNBEngine
         return $sel;
     }
 
-    private static function fetchRemote(string $remote, string $stage, array $sel): void
+    private static function fetchRemote(string $remote, string $stage, array $sel, bool $archive = false): void
     {
         // $optional: mục có thể không tồn tại (rclone không lưu thư mục rỗng) -> bỏ qua thay vì làm hỏng cả lượt khôi phục.
         $copy = function (string $rel, bool $optional = false) use ($remote, $stage) {
@@ -769,13 +970,15 @@ final class WNBEngine
             }
         };
         if ($sel['home'] === ['']) {
-            $code = WNBShell::run(WNBRclone::cmd('copy ' . escapeshellarg($remote) . ' ' . escapeshellarg($stage) . ' --transfers 4 --retries 3', true), $out);
+            // Bản nén: phần home được giải nén thẳng từ cloud vào home ở bước sau, không tải về đĩa.
+            $skip = $archive ? ' --exclude /homedir.tar.gz --exclude /homedir.index.gz' : '';
+            $code = WNBShell::run(WNBRclone::cmd('copy ' . escapeshellarg($remote) . ' ' . escapeshellarg($stage) . $skip . ' --transfers 4 --retries 3', true), $out);
             if ($code !== 0) {
                 throw new WNBError('Tải bản sao lưu từ cloud thất bại: {detail}', ['detail' => WNBShell::tail($out, 2)]);
             }
             return;
         }
-        foreach ($sel['home'] as $p) {
+        foreach ($archive ? [] : $sel['home'] as $p) {
             $copy('homedir/' . $p);
         }
         foreach ($sel['databases'] as $db) {
@@ -783,7 +986,9 @@ final class WNBEngine
         }
         foreach ($sel['emails'] as $e) {
             [$box, $d] = explode('@', $e, 2);
-            $copy('homedir/imap/' . $d . '/' . $box, true);
+            if (!$archive) {
+                $copy('homedir/imap/' . $d . '/' . $box, true);
+            }
             $copy('emails/' . $d, true);
         }
         foreach ($sel['dns'] as $d) {
@@ -851,6 +1056,54 @@ final class WNBEngine
             }
         } finally {
             self::rmrf($stage);
+        }
+    }
+
+    /**
+     * Khôi phục home từ bản nén: rclone cat | gzip -dc | tar -x chạy BẰNG QUYỀN CỦA USER ngay trong home,
+     * không cần chỗ trống để dựng staging. File mới phát sinh sau thời điểm sao lưu được giữ nguyên.
+     */
+    private static function restoreHomeArchive(string $u, array $b, array $items, array &$warnings): void
+    {
+        $pw = WNBDirectAdmin::passwd($u);
+        if (!$pw || !is_dir($pw['home'])) {
+            throw new WNBError('Không tìm thấy thư mục home của tài khoản.');
+        }
+        if (array_key_exists('home_archive', $b) && !$b['home_archive']) {
+            throw new WNBError('Bản sao lưu không có dữ liệu home.');
+        }
+        $members = [];
+        if ($items !== ['']) {
+            foreach ($items as $rel) {
+                if (self::archiveHas($b, $rel)) {
+                    $members[] = './' . $rel;
+                } else {
+                    $warnings[] = WNBLang::msg('Bỏ qua {item}: không có trong bản sao lưu.', ['item' => $rel]);
+                }
+            }
+            if (!$members) {
+                return;
+            }
+        }
+        $tar = WNBShell::which('tar') ?: 'tar';
+        $extract = sprintf(
+            '%s -xf - -C %s -p --no-same-owner --no-overwrite-dir --no-wildcards --quoting-style=literal%s',
+            escapeshellarg($tar),
+            escapeshellarg($pw['home']),
+            $members ? ' -- ' . implode(' ', array_map('escapeshellarg', $members)) : ''
+        );
+        WNBShell::bash(sprintf(
+            '%s | gzip -dc | %s; echo "WNB_PIPE ${PIPESTATUS[*]}"',
+            WNBRclone::cmd('cat ' . escapeshellarg(WNBRclone::join((string)$b['storage_path'], 'homedir.tar.gz')) . ' --retries 3', true),
+            WNBShell::asUser($u, $extract)
+        ), $out);
+        [$dlCode, $gzCode, $tarCode] = self::pipeStatus($out, 3);
+        if ($dlCode !== 0 || $gzCode !== 0) {
+            throw new WNBError('Tải bản sao lưu từ cloud thất bại: {detail}', ['detail' => WNBShell::tail($out, 3)]);
+        }
+        if ($tarCode !== 0) {
+            // Giải nén một phần (hết quota, thiếu quyền ở vài file): dữ liệu còn lại đã được ghi.
+            $warnings[] = WNBLang::msg('Một số file không ghi được (hết quota hoặc thiếu quyền): {detail}', ['detail' => WNBShell::tail($out, 2)]);
         }
     }
 
@@ -987,7 +1240,8 @@ final class WNBEngine
                     self::step($task, 15, 'Tải bản sao lưu từ cloud');
                     $stage = self::stagingRoot() . '/dl_' . $task['id'];
                     self::mkdirSecure($stage, 0700);
-                    if (WNBShell::run(WNBRclone::cmd('copy ' . escapeshellarg($src) . ' ' . escapeshellarg($stage) . ' --transfers 4', true), $out) !== 0) {
+                    $skip = ($b['format'] ?? 'folder') === 'archive' ? ' --exclude /homedir.index.gz' : '';
+                    if (WNBShell::run(WNBRclone::cmd('copy ' . escapeshellarg($src) . ' ' . escapeshellarg($stage) . $skip . ' --transfers 4', true), $out) !== 0) {
                         throw new WNBError('Tải bản sao lưu từ cloud thất bại: {detail}', ['detail' => WNBShell::tail($out, 2)]);
                     }
                     $src = $stage;
@@ -1237,6 +1491,11 @@ final class WNBEngine
                 @unlink($f);
             }
         }
+        foreach (glob(WNBStorage::path('cache/idx_*')) ?: [] as $f) {
+            if (filemtime($f) < $now - 86400) {
+                @unlink($f);
+            }
+        }
         foreach (glob(WNBStorage::path('logs/*.log')) ?: [] as $f) {
             if (filemtime($f) < $now - 60 * 86400) {
                 @unlink($f);
@@ -1250,6 +1509,151 @@ final class WNBEngine
                     self::rmrf($dir);
                 }
             }
+        }
+    }
+
+    /* ============================== Giám sát ============================== */
+
+    /** Số giờ giữa hai lượt chạy của lịch. */
+    private static function jobIntervalHours(array $job): int
+    {
+        if ($job['schedule_type'] === 'hourly') {
+            return max(1, (int)$job['interval_hours']);
+        }
+        return $job['schedule_type'] === 'weekly' ? 168 : 24;
+    }
+
+    /**
+     * Các nguy cơ mất dữ liệu đang có: [['code' => khóa ổn định để chống gửi trùng, 'msg' => WNBLang::msg]].
+     * Dùng cho banner Tổng quan và cảnh báo định kỳ qua Telegram/email.
+     */
+    public static function healthIssues(): array
+    {
+        $issues = [];
+        $settings = WNBStorage::settings();
+        $jobs = array_values(array_filter(WNBStorage::read('jobs'), fn($j) => !empty($j['enabled'])));
+        if (!$jobs) {
+            return [['code' => 'no_job', 'msg' => WNBLang::msg('Chưa bật lịch sao lưu tự động nào: máy chủ đang KHÔNG được tự sao lưu.')]];
+        }
+        $now = time();
+
+        // 1. Ổ đĩa: thiếu chỗ thì lượt sao lưu kế tiếp sẽ bị từ chối hoặc lỗi giữa chừng.
+        $checks = [];
+        foreach ($jobs as $j) {
+            $dest = self::findDestination((string)$j['destination_id']);
+            if (!$dest) {
+                $issues[] = ['code' => 'dest_missing:' . $j['id'], 'msg' => WNBLang::msg('Lịch "{job}" dùng kho lưu trữ đã bị xóa.', ['job' => $j['name']])];
+                continue;
+            }
+            if ($dest['type'] === 'local') {
+                $path = rtrim((string)$dest['path'], '/');
+                $need = [(float)$settings['min_free_gb'], self::MIN_FREE_INODES];
+            } else {
+                $path = rtrim((string)$settings['local_backup_root'], '/');
+                $need = WNBRclone::destFormat($dest) === 'archive' ? [self::ARCHIVE_MIN_FREE_GB, self::ARCHIVE_MIN_FREE_INODES] : [(float)$settings['min_free_gb'], self::MIN_FREE_INODES];
+            }
+            $cur = $checks[$path] ?? [0.0, 0];
+            $checks[$path] = [max($cur[0], $need[0]), max($cur[1], $need[1])];
+        }
+        foreach ($checks as $path => [$minGb, $minInodes]) {
+            $probe = $path;
+            while ($probe !== '' && $probe !== '/' && !is_dir($probe)) {
+                $probe = dirname($probe);
+            }
+            $free = @disk_free_space($probe ?: '/');
+            if ($free !== false && $minGb > 0 && $free / 1073741824 < $minGb) {
+                $issues[] = ['code' => 'disk:' . $path, 'msg' => WNBLang::msg('Ổ đĩa chứa {path} chỉ còn {free} GB trống (cần tối thiểu {min} GB): lịch sao lưu sẽ không chạy được.', ['path' => $path, 'free' => round($free / 1073741824, 2), 'min' => $minGb])];
+            }
+            $inodes = WNB::isPreview() ? null : self::freeInodes($probe ?: '/');
+            if ($inodes !== null && $inodes < $minInodes) {
+                $issues[] = ['code' => 'inode:' . $path, 'msg' => WNBLang::msg('Ổ đĩa chứa {path} chỉ còn {n} inode trống (cần tối thiểu {min}): lịch sao lưu sẽ không chạy được.', ['path' => $path, 'n' => $inodes, 'min' => $minInodes])];
+            }
+        }
+
+        // 2. Lịch không chạy đúng giờ (cron hỏng) hoặc lượt gần nhất có lỗi.
+        foreach ($jobs as $j) {
+            $next = self::nextRun($j);
+            if ($next !== null && $next < $now - 7200) {
+                $issues[] = ['code' => 'overdue:' . $j['id'], 'msg' => WNBLang::msg('Lịch "{job}" lẽ ra phải chạy lúc {time} nhưng chưa chạy. Kiểm tra cron /etc/cron.d/webnowbackup.', ['job' => $j['name'], 'time' => date('Y-m-d H:i', $next)])];
+            }
+            $r = $j['last_result'] ?? null;
+            if ($r && !empty($r['finished_at']) && (int)$r['failed'] > 0) {
+                $issues[] = ['code' => 'failed:' . $j['id'] . ':' . ($j['last_run'] ?? ''), 'msg' => WNBLang::msg('Lịch "{job}": lượt chạy gần nhất lỗi {failed}/{total} tài khoản.', ['job' => $j['name'], 'failed' => $r['failed'], 'total' => $r['total']])];
+            }
+        }
+
+        // 3. Tài khoản quá hạn: không có bản sao lưu nào mới hơn (chu kỳ lịch + 12 giờ).
+        $limit = [];
+        foreach ($jobs as $j) {
+            $h = self::jobIntervalHours($j) + 12;
+            foreach (self::jobTargets($j) as $u) {
+                $limit[$u] = min($limit[$u] ?? PHP_INT_MAX, $h);
+            }
+        }
+        $last = [];
+        foreach (WNBStorage::read('backups') as $b) {
+            if (($b['type'] ?? '') === 'backup') {
+                $t = strtotime((string)$b['created_at']) ?: 0;
+                $last[$b['username']] = max($last[$b['username']] ?? 0, $t);
+            }
+        }
+        $stale = [];
+        foreach ($limit as $u => $h) {
+            $since = $now - $h * 3600;
+            $created = (int)(WNBDirectAdmin::account($u)['created_ts'] ?? 0);
+            if (($last[$u] ?? 0) < $since && $created < $since) {
+                $stale[] = $u;
+            }
+        }
+        if ($stale) {
+            sort($stale);
+            $issues[] = ['code' => 'stale:' . implode(',', $stale), 'msg' => WNBLang::msg('{n} tài khoản quá hạn chưa có bản sao lưu mới: {list}', ['n' => count($stale), 'list' => implode(', ', array_slice($stale, 0, 15)) . (count($stale) > 15 ? ', …' : '')])];
+        }
+        return $issues;
+    }
+
+    /**
+     * Chạy từ cron (tối đa 30 phút/lần): gửi cảnh báo khi xuất hiện nguy cơ mới, nhắc lại mỗi 24 giờ
+     * khi vẫn chưa xử lý, và báo khi mọi thứ đã ổn trở lại.
+     */
+    public static function healthCheck(bool $force = false): void
+    {
+        $state = WNBStorage::read('health');
+        $now = time();
+        // Dựa cả vào mtime: khi ổ đầy không ghi được JSON thì touch vẫn chặn được gửi dồn dập mỗi phút.
+        $file = WNBStorage::path('health.json');
+        $last = max((int)($state['checked_at'] ?? 0), is_file($file) ? (int)filemtime($file) : 0);
+        if (!$force && $now - $last < 1800) {
+            return;
+        }
+        WNBLang::set((string)WNBStorage::settings()['language']);
+        $issues = self::healthIssues();
+        $sig = $issues ? md5(implode('|', array_column($issues, 'code'))) : '';
+        $prev = (string)($state['signature'] ?? '');
+        $state['checked_at'] = $now;
+        $send = '';
+        if ($sig !== '' && ($sig !== $prev || $now - (int)($state['sent_at'] ?? 0) >= 86400)) {
+            $send = 'alert';
+        } elseif ($sig === '' && $prev !== '') {
+            $send = 'ok';
+        }
+        if ($send !== '' && !empty(WNBStorage::settings()['notify_health'])) {
+            if ($send === 'alert') {
+                $title = wnb_t('[WebNowBackup] Cảnh báo sao lưu trên {host}: {n} vấn đề', ['host' => self::hostname(), 'n' => count($issues)]);
+                $body = $title . "\n";
+                foreach ($issues as $i) {
+                    $body .= '• ' . WNBLang::render($i['msg']) . "\n";
+                }
+            } else {
+                $title = wnb_t('[WebNowBackup] {host}: sao lưu đã hoạt động bình thường trở lại', ['host' => self::hostname()]);
+                $body = $title . "\n";
+            }
+            self::notify($title, $body);
+            $state['sent_at'] = $now;
+        }
+        $state['signature'] = $sig;
+        if (!WNBStorage::write('health', $state)) {
+            @touch($file);
         }
     }
 

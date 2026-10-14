@@ -99,6 +99,7 @@ final class WNBDirectAdmin
                 'suspended' => ($conf['suspended'] ?? 'no') === 'yes',
                 'quota_mb' => is_numeric($conf['quota'] ?? null) ? (float)$conf['quota'] : 0.0,
                 'usage_mb' => round((float)($usage['quota'] ?? 0), 1),
+                'created_ts' => (int)(strtotime((string)($conf['date_created'] ?? '')) ?: 0),
             ];
             if ($detailed) {
                 $acc['databases'] = self::databases($u);

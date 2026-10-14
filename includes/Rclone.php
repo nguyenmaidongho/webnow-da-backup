@@ -20,6 +20,29 @@ final class WNBRclone
     /** Các trường bí mật: không bao giờ trả về giao diện. */
     public const SECRET_FIELDS = ['secret_access_key', 'key', 'pass', 'token'];
 
+    /**
+     * Loại kho tải lên dạng luồng (rclone rcat) mà không cần file tạm trên đĩa local,
+     * nên dùng được chế độ "Nén". WebDAV/OneDrive có thể phải đệm cả file ra đĩa nên chỉ dùng chế độ thư mục.
+     */
+    public const ARCHIVE_TYPES = ['s3', 'r2', 'b2', 'sftp', 'ftp', 'drive'];
+
+    public static function supportsArchive(string $type): bool
+    {
+        return in_array($type, self::ARCHIVE_TYPES, true);
+    }
+
+    /**
+     * Cách lưu bản sao lưu trên kho: 'archive' = mỗi bản là vài file nén (nhanh, không cần chỗ trống local),
+     * 'folder' = cây thư mục từng file (duyệt/khôi phục từng file trực tiếp nhưng tải lên chậm). Kho local luôn là 'folder'.
+     */
+    public static function destFormat(array $dest): string
+    {
+        if (($dest['type'] ?? 'local') === 'local' || !self::supportsArchive((string)$dest['type'])) {
+            return 'folder';
+        }
+        return ($dest['format'] ?? 'archive') === 'folder' ? 'folder' : 'archive';
+    }
+
     public static function binary(): string
     {
         return WNB::isPreview() ? '' : WNBShell::which('rclone');
@@ -226,6 +249,10 @@ final class WNBRclone
             throw new WNBError('Đường dẫn không hợp lệ.');
         }
 
+        if (($backup['format'] ?? 'folder') === 'archive') {
+            return self::listArchive($backup, $rel);
+        }
+
         if (($dest['type'] ?? 'local') === 'local') {
             $base = rtrim((string)$backup['storage_path'], '/') . '/homedir';
             $dir = $rel === '' ? $base : $base . '/' . $rel;
@@ -280,6 +307,74 @@ final class WNBRclone
             ];
         }
         return self::sortItems($items);
+    }
+
+    /** Liệt kê một thư mục của bản nén dựa vào file chỉ mục (không phải tải bản nén). */
+    private static function listArchive(array $backup, string $rel): array
+    {
+        $fp = @fopen(WNBEngine::archiveIndex($backup), 'rb');
+        if (!$fp) {
+            throw new WNBError('Không đọc được danh sách file của bản sao lưu.');
+        }
+        $prefix = $rel === '' ? '' : $rel . '/';
+        $found = $rel === '';
+        $items = [];
+        while (($line = fgets($fp)) !== false) {
+            $e = self::parseIndexLine(rtrim($line, "\r\n"));
+            if (!$e) {
+                continue;
+            }
+            if ($e['path'] === $rel) {
+                $found = true;
+                continue;
+            }
+            if ($prefix !== '' && strpos($e['path'], $prefix) !== 0) {
+                continue;
+            }
+            $found = true;
+            $rest = substr($e['path'], strlen($prefix));
+            $slash = strpos($rest, '/');
+            if ($slash === false) {
+                $items[$rest] = ['name' => $rest, 'path' => $e['path'], 'type' => $e['type'], 'size' => $e['size'], 'mtime' => $e['mtime']];
+            } elseif (!isset($items[substr($rest, 0, $slash)])) {
+                // Thư mục cha không có dòng riêng trong chỉ mục (hiếm): vẫn hiển thị.
+                $name = substr($rest, 0, $slash);
+                $items[$name] = ['name' => $name, 'path' => $prefix . $name, 'type' => 'dir', 'size' => 0, 'mtime' => ''];
+            }
+        }
+        fclose($fp);
+        if (!$found) {
+            throw new WNBError('Thư mục không tồn tại trong bản sao lưu.');
+        }
+        return self::sortItems(array_values($items));
+    }
+
+    /**
+     * Một dòng của `tar -cvv --quoting-style=literal`, vd:
+     *   -rw-r--r-- 1000/1000      1234 2024-05-01 12:00 ./domains/a.vn/public_html/index.php
+     *   lrwxrwxrwx 1000/1000         0 2024-05-01 12:00 ./public_html -> ./domains/a.vn/public_html
+     * Trả về path (không có "./" và "/" cuối), type (dir|file|link), size, mtime; null nếu không phải dòng mục.
+     */
+    public static function parseIndexLine(string $line): ?array
+    {
+        if (!preg_match('#^([-dlhcbpsDCM])\S*\s+\S+\s+(\d+|\d+,\s*\d+)\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?)\s(.+)$#', $line, $m)) {
+            return null;
+        }
+        $name = $m[4];
+        if ($m[1] === 'l' && ($p = strpos($name, ' -> ')) !== false) {
+            $name = substr($name, 0, $p);
+        } elseif ($m[1] === 'h' && ($p = strpos($name, ' link to ')) !== false) {
+            $name = substr($name, 0, $p);
+        }
+        if (strpos($name, './') === 0) {
+            $name = substr($name, 2);
+        }
+        $name = rtrim($name, '/');
+        if ($name === '' || $name === '.') {
+            return null;
+        }
+        $type = $m[1] === 'd' ? 'dir' : ($m[1] === 'l' ? 'link' : 'file');
+        return ['path' => $name, 'type' => $type, 'size' => $type === 'file' && strpos($m[2], ',') === false ? (int)$m[2] : 0, 'mtime' => strlen($m[3]) === 16 ? $m[3] . ':00' : $m[3]];
     }
 
     private static function sortItems(array $items): array

@@ -537,7 +537,7 @@
         var cutoff = serverNow() - 48 * 3600 * 1000;
         var excluded = globalExcluded();
         var stale = S.accounts.filter(function (a) { var d = parseDate(a.last_backup_at); return !excluded[a.username] && (!d || d.getTime() < cutoff); });
-        var html = '<div class="grid grid-4" style="margin-bottom:16px">' +
+        var html = healthBanner() + '<div class="grid grid-4" style="margin-bottom:16px">' +
             statCard('users', '', t('Tài khoản'), st.accounts, esc(stale.length ? t('{n} chưa sao lưu trong 48 giờ', { n: stale.length }) : t('Tất cả đã được sao lưu'))) +
             statCard('archive', 'ok', t('Bản sao lưu'), st.backups, esc(t('{size} trên các kho', { size: fmtMb(st.size_mb) }))) +
             statCard('activity', st.running ? '' : 'ok', t('Đang chạy'), st.running, esc(st.running ? t('Tác vụ trong hàng đợi') : t('Không có tác vụ'))) +
@@ -568,6 +568,15 @@
                 : '<div class="card-body muted">' + ic('check') + ' ' + esc(t('Mọi tài khoản đều có bản sao lưu gần đây.')) + '</div>') +
             '</div></div></div>';
         return html;
+    }
+    /** Nguy cơ mất dữ liệu do máy chủ phát hiện (ổ đầy, tài khoản quá hạn, lịch không chạy...). */
+    function healthBanner() {
+        var list = S.health || [];
+        if (!list.length) return '';
+        var notify = S.settings.telegram_configured || S.settings.notify_email;
+        return '<div class="banner bad">' + ic('alert', 'i-lg') + '<div class="grow"><strong>' + esc(t('Có nguy cơ mất dữ liệu: {n} vấn đề cần xử lý', { n: list.length })) + '</strong>' +
+            '<ul style="margin:6px 0 0;padding-left:18px">' + list.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
+            (notify ? '' : '<div class="small" style="margin-top:6px">' + esc(t('Chưa cấu hình Telegram hay email nên máy chủ không báo được cho bạn. Hãy thiết lập trong Cài đặt.')) + '</div>') + '</div></div>';
     }
     function healthRow(ok, title, sub, action) {
         return '<div class="health"><span class="badge ' + (ok ? 'ok' : 'warn') + '" style="width:22px;padding:0;justify-content:center">' + ic(ok ? 'check' : 'alert') + '</span>' +
@@ -779,7 +788,7 @@
             var where = d.type === 'local' ? d.path : d.subpath;
             var test = d.last_test ? '<span class="badge ' + (d.last_test.ok ? 'ok' : 'bad') + '" title="' + esc(d.last_test.message) + '">' + esc(d.last_test.ok ? t('Kết nối tốt') : t('Lỗi kết nối')) + '</span><div class="cell-sub">' + esc(fmtRel(d.last_test.at)) + '</div>' : '<span class="muted">' + esc(t('Chưa kiểm tra')) + '</span>';
             return '<tr><td><div class="row"><div class="list-icon">' + ic(ty.icon) + '</div><div><div class="cell-main">' + esc(nameOf(d.name)) + '</div><div class="cell-sub mono">' + esc(where) + '</div></div></div></td>' +
-                '<td class="hide-sm">' + esc(t(ty.label)) + '</td><td class="num">' + (d.free_gb !== null && d.free_gb !== undefined ? esc(d.free_gb) + ' GB' : '—') + '</td><td>' + test + '</td>' +
+                '<td class="hide-sm">' + esc(t(ty.label)) + '<div class="cell-sub">' + esc(formatLabel(d)) + '</div></td><td class="num">' + (d.free_gb !== null && d.free_gb !== undefined ? esc(d.free_gb) + ' GB' : '—') + '</td><td>' + test + '</td>' +
                 '<td class="actions"><button class="btn btn-sm" data-act="dest-test" data-id="' + esc(d.id) + '">' + ic('check') + esc(t('Kiểm tra')) + '</button>' +
                 '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-edit" data-id="' + esc(d.id) + '" aria-label="' + esc(t('Sửa')) + '">' + ic('edit') + '</button>' +
                 (d.id !== 'dest_local' ? '<button class="btn btn-sm btn-ghost btn-icon danger" data-act="dest-delete" data-id="' + esc(d.id) + '" aria-label="' + esc(t('Xóa')) + '">' + ic('trash') + '</button>' : '') + '</td></tr>';
@@ -787,9 +796,15 @@
         return (!S.engine.rclone ? '<div class="banner warn">' + ic('alert', 'i-lg') + '<div><strong>' + esc(t('Chưa cài rclone')) + '</strong>' + esc(t('Chỉ dùng được kho trên ổ cứng máy chủ. Chạy lại scripts/install.sh bằng root để cài rclone và dùng kho cloud.')) + '</div></div>' : '') +
             '<div class="card"><div class="card-head"><div class="card-title">' + esc(t('Kho lưu trữ')) + '</div><button class="btn btn-primary btn-sm right" data-act="dest-edit">' + ic('plus') + esc(t('Thêm kho')) + '</button></div>' +
             '<div class="table-wrap"><table class="t"><thead><tr><th>' + esc(t('Kho')) + '</th><th class="hide-sm">' + esc(t('Loại')) + '</th><th class="num">' + esc(t('Còn trống')) + '</th><th>' + esc(t('Kết nối')) + '</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
-            '<div class="card-foot" style="justify-content:flex-start"><span class="muted small">' + ic('info') + ' ' + esc(t('Bản sao lưu trên ổ cứng dùng hardlink: mỗi bản chỉ tốn dung lượng cho phần thay đổi. Kho cloud lưu dạng thư mục nên vẫn khôi phục được từng file mà không phải tải cả bản.')) + '</span></div></div>';
+            '<div class="card-foot" style="justify-content:flex-start"><span class="muted small">' + ic('info') + ' ' + esc(t('Bản sao lưu trên ổ cứng dùng hardlink: mỗi bản chỉ tốn dung lượng cho phần thay đổi. Kho cloud kiểu Nén đẩy thẳng bản nén lên cloud: nhanh và gần như không cần chỗ trống trên máy chủ.')) + '</span></div></div>';
     }
 
+    /** Loại kho dùng được chế độ Nén (khớp WNBRclone::ARCHIVE_TYPES). */
+    var ARCHIVE_TYPES = ['s3', 'r2', 'b2', 'sftp', 'ftp', 'drive'];
+    function formatLabel(d) {
+        if (d.type === 'local') return t('Incremental (hardlink)');
+        return d.format === 'archive' ? t('Nén') : t('Thư mục');
+    }
     function destForm(dest) {
         var d = dest || { type: 'local', name: '', path: '', subpath: '', params: {} };
         var typeOpts = Object.keys(DEST_TYPES).map(function (k) { return '<option value="' + k + '"' + (d.type === k ? ' selected' : '') + '>' + esc(t(DEST_TYPES[k].label)) + '</option>'; }).join('');
@@ -799,6 +814,10 @@
             '<div class="field full" data-kind="local"><label>' + esc(t('Thư mục trên máy chủ')) + '</label><input class="input mono" name="path" value="' + esc(d.path || '') + '" placeholder="/backup/webnowbackup"><div class="hint">' + esc(t('Nên dùng ổ đĩa riêng. Không được nằm trong thư mục home của khách.')) + '</div></div>' +
             '<div data-kind="remote" class="full form-grid" style="grid-column:1/-1"></div>' +
             '<div class="field full" data-kind="remote"><label>' + esc(t('Bucket / thư mục đích')) + '</label><input class="input mono" name="subpath" value="' + esc(d.subpath || '') + '" placeholder="' + esc(t('ten-bucket/server1')) + '"></div>' +
+            '<div class="field full" data-kind="remote"><label>' + esc(t('Cách lưu trên cloud')) + '</label><select class="select" name="format">' +
+            '<option value="archive"' + (d.format !== 'folder' ? ' selected' : '') + '>' + esc(t('Nén (khuyên dùng): nhanh, không cần chỗ trống trên máy chủ')) + '</option>' +
+            '<option value="folder"' + (d.format === 'folder' ? ' selected' : '') + '>' + esc(t('Thư mục: duyệt và khôi phục từng file trực tiếp, tải lên chậm')) + '</option></select>' +
+            '<div class="hint" data-format-hint></div></div>' +
             '</form>' + (!S.engine.rclone ? '<div class="banner warn" data-kind="remote" style="margin:14px 0 0">' + ic('alert', 'i-lg') + '<div>' + esc(t('Máy chủ chưa cài rclone nên chưa dùng được kho cloud.')) + '</div></div>' : '');
         var m = openModal({ title: dest ? t('Sửa kho lưu trữ') : t('Thêm kho lưu trữ'), body: body, foot: '<button class="btn" data-close-m>' + esc(t('Hủy')) + '</button><button class="btn btn-primary" data-save>' + ic('check') + esc(t('Lưu & kiểm tra kết nối')) + '</button>' });
         var form = m.el.querySelector('form');
@@ -806,6 +825,12 @@
         var sync = function () {
             var ty = form.type.value;
             m.el.querySelectorAll('[data-kind]').forEach(function (el) { el.hidden = (el.getAttribute('data-kind') === 'local') !== (ty === 'local'); });
+            var canArchive = ARCHIVE_TYPES.indexOf(ty) !== -1;
+            form.format.disabled = !canArchive;
+            if (!canArchive) form.format.value = 'folder';
+            form.querySelector('[data-format-hint]').textContent = canArchive
+                ? t('Nén: home và database được nén rồi đẩy thẳng lên cloud, máy chủ chỉ cần vài trăm MB trống. Khôi phục một file sẽ tải cả bản nén của tài khoản.')
+                : t('Loại kho này chỉ hỗ trợ kiểu Thư mục (cần chỗ trống trên máy chủ bằng dung lượng tài khoản trong lúc sao lưu).');
             remoteBox.innerHTML = (DEST_FIELDS[ty] || []).map(function (f) {
                 var name = 'p_' + f[0], kind = f[2] || '', ph = t(f[3] || ''), val = (dest && d.type === ty && d.params && d.params[f[0]]) || '';
                 var savedSecret = dest && d['has_' + f[0]];
@@ -826,6 +851,7 @@
         m.el.querySelector('[data-save]').onclick = function (e) {
             var data = formData(form);
             data.type = form.type.value;
+            data.format = form.format.value;
             var btn = e.currentTarget;
             btn.classList.add('loading');
             api('dest_save', data).then(function (res) {
@@ -909,6 +935,7 @@
             [['errors', t('Chỉ khi có lỗi')], ['always', t('Luôn gửi')], ['off', t('Không gửi')]].map(function (o) { return '<option value="' + o[0] + '"' + (s.notify_job_report === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select></div>' +
             '<div class="field"><label>' + esc(t('Ngôn ngữ thông báo')) + '</label><select class="select" name="language"><option value="vi"' + (s.language !== 'en' ? ' selected' : '') + '>Tiếng Việt</option><option value="en"' + (s.language === 'en' ? ' selected' : '') + '>English</option></select></div>' +
             '<div class="field full">' + switchHTML('name="notify_on_failure"', s.notify_on_failure, esc(t('Báo ngay khi tác vụ thủ công bị lỗi'))) + '</div>' +
+            '<div class="field full">' + switchHTML('name="notify_health"', s.notify_health !== false, esc(t('Cảnh báo khi có nguy cơ mất dữ liệu (ổ đĩa gần đầy, tài khoản quá hạn chưa sao lưu, lịch không chạy). Nhắc lại mỗi ngày đến khi xử lý xong.'))) + '</div>' +
             '</div></div></div></div>' +
             '<div class="row" style="justify-content:flex-end;margin:16px 0 24px"><button type="button" class="btn btn-primary" data-act="settings-save">' + ic('check') + esc(t('Lưu cài đặt')) + '</button></div></form>';
 
@@ -1048,7 +1075,8 @@
         var canR = perm('can_restore');
         switch (R.section) {
             case 'files':
-                return '<div class="files"><div class="files-head"><div class="crumbs" data-crumbs>' + crumbs() + '</div></div><div class="files-body" data-files><div class="card-body"><div class="skeleton" style="width:60%"></div></div></div></div>' + selectionBar(canR);
+                return (b.format === 'archive' ? '<p class="muted small" style="margin:0 0 10px">' + ic('info') + ' ' + esc(t('Bản nén: khôi phục file sẽ tải bản nén của tài khoản từ cloud rồi lấy đúng các mục đã chọn, có thể mất vài phút.')) + '</p>' : '') +
+                    '<div class="files"><div class="files-head"><div class="crumbs" data-crumbs>' + crumbs() + '</div></div><div class="files-body" data-files><div class="card-body"><div class="skeleton" style="width:60%"></div></div></div></div>' + selectionBar(canR);
             case 'databases':
                 return pickList(b.databases, 'database', t('Bản sao lưu này không có database.'), t('Database được import đè lên database hiện tại cùng tên. Database đã bị xóa sẽ được tạo lại (cần gán lại user database trong DirectAdmin).'), canR);
             case 'emails':

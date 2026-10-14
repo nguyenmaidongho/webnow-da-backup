@@ -3,7 +3,10 @@
 Plugin sao lưu và khôi phục cho DirectAdmin (Evolution), dùng cho cả Admin, Reseller và User.
 
 - **Kho local**: incremental bằng hardlink (`rsync --link-dest`). Mỗi bản chỉ tốn dung lượng cho phần thay đổi.
-- **Kho cloud** qua rclone: S3/Wasabi/MinIO, Cloudflare R2, Backblaze B2, SFTP, FTP, WebDAV, Google Drive, OneDrive. Bản sao lưu lưu dạng thư mục nên vẫn duyệt và khôi phục được từng file.
+- **Kho cloud** qua rclone: S3/Wasabi/MinIO, Cloudflare R2, Backblaze B2, SFTP, FTP, WebDAV, Google Drive, OneDrive. Hai kiểu lưu:
+  - **Nén** (mặc định cho S3, R2, B2, SFTP, FTP, Google Drive): home và database được nén rồi đẩy thẳng lên cloud theo luồng (`tar | gzip | rclone rcat`), máy chủ chỉ cần vài trăm MB trống, nhanh hơn nhiều so với tải từng file. Kèm danh sách file (`homedir.index.gz`) để vẫn duyệt và khôi phục được từng file; khôi phục giải nén thẳng vào home bằng quyền của user.
+  - **Thư mục**: mỗi file là một object, duyệt/khôi phục từng file trực tiếp nhưng tải lên chậm và cần chỗ trống local bằng dung lượng tài khoản.
+- **Giám sát nguy cơ mất dữ liệu**: mỗi 30 phút kiểm tra ổ đĩa (GB và inode), tài khoản quá hạn chưa có bản sao lưu, lịch không chạy đúng giờ, lượt chạy lỗi; báo qua Telegram/email khi có vấn đề mới, nhắc lại mỗi 24 giờ và báo khi đã ổn. Hiện banner ở Tổng quan.
 - **Khôi phục từng phần**: file/thư mục, database, hộp thư email, DNS zone, cron, hoặc toàn bộ tài khoản.
 - **Lịch tự động**: hằng ngày, hằng tuần hoặc theo số giờ. Lịch luôn sao lưu tất cả tài khoản (kể cả tài khoản tạo sau này), chỉ trừ các tài khoản bị loại trừ; mỗi lịch có danh sách loại trừ và số bản giữ lại riêng. **Loại trừ theo reseller** (như Resellers Filter của JetBackup): loại trừ một reseller thì cả reseller lẫn toàn bộ khách của họ, kể cả khách tạo sau này, không được sao lưu (chọn `admin` cho khách do Admin tạo). Danh sách "Không bao giờ tự sao lưu" (theo reseller và theo tài khoản) áp dụng cho mọi lịch.
 - **Snapshot** do khách tự tạo, **tải bản sao lưu** dạng `.tar.gz`, **phân quyền** theo từng reseller, **hạn mức** dung lượng.
@@ -60,3 +63,5 @@ Rồi mở `http://127.0.0.1:8088/?role=admin` (hoặc `reseller`, `user`). Thê
 - **Khôi phục toàn bộ** áp dụng vào tài khoản **đang tồn tại**. Nếu tài khoản đã bị xóa, hãy tạo lại tài khoản trong DirectAdmin trước.
 - Database được import lại nội dung, nhưng **chưa sao lưu user/quyền MySQL**. Nếu database đã bị xóa, cần gán lại user database trong DirectAdmin.
 - Kho cloud không dùng hardlink: mỗi bản là một bản đầy đủ trên cloud. Hãy đặt số bản giữ lại phù hợp.
+- Bản kiểu Nén: khôi phục một file phải tải (stream) cả bản nén home của tài khoản từ cloud.
+- Giám sát chạy trong cron của plugin: nếu cron hỏng thì không gửi được cảnh báo (banner trong giao diện vẫn hiện).

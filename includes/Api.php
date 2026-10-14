@@ -376,6 +376,7 @@ final class WNBApi
                 }
                 unset($params['type']);
                 $d['params'] = $params;
+                $d['format'] = WNBRclone::destFormat($d);
                 if (isset($d['last_test']['message'])) {
                     $d['last_test']['message'] = WNBLang::render($d['last_test']['message']);
                 }
@@ -413,6 +414,7 @@ final class WNBApi
             $state['settings'] = $settings;
             $state['settings']['telegram_configured'] = $settings['telegram_token'] !== '' && $settings['telegram_chat_id'] !== '';
             unset($state['settings']['telegram_token'], $state['settings']['telegram_chat_id']);
+            $state['health'] = array_map(fn($i) => WNBLang::render($i['msg']), WNBEngine::healthIssues());
             $state['jobs'] = array_map(function ($j) {
                 $j = array_merge(['exclude_users' => [], 'exclude_resellers' => [], 'skip_suspended' => false], $j);
                 unset($j['target'], $j['users'], $j['resellers']);
@@ -615,6 +617,7 @@ final class WNBApi
             }
             $rec['remote'] = $existing['remote'] ?? 'wnb_' . substr($id, 5);
             $rec['subpath'] = $sub;
+            $rec['format'] = WNBRclone::supportsArchive($type) && (string)($p['format'] ?? 'archive') !== 'folder' ? 'archive' : 'folder';
             $input = [];
             foreach (WNBRclone::TYPES[$type]['fields'] as $f) {
                 $input[$f] = (string)($p['p_' . $f] ?? '');
@@ -811,6 +814,7 @@ final class WNBApi
             'notify_email' => $email,
             'notify_on_failure' => (string)($p['notify_on_failure'] ?? '1') === '1',
             'notify_job_report' => $report,
+            'notify_health' => (string)($p['notify_health'] ?? '1') === '1',
             'telegram_token' => $token,
             'telegram_chat_id' => $chat,
             'excludes' => $excludes,

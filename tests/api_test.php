@@ -185,4 +185,5 @@ $r = call('admin','admin',['action'=>'settings_save','local_backup_root'=>'/home
 ok(!$r['ok'], 'settings chặn home khách');
 
 require __DIR__ . "/api_test2.php";
+require __DIR__ . "/api_test3.php";
 echo "PASS: $pass  FAIL: $fail\n";

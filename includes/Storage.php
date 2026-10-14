@@ -136,6 +136,7 @@ final class WNBStorage
             'notify_email' => '',
             'notify_on_failure' => true,
             'notify_job_report' => 'errors',
+            'notify_health' => true,
             'telegram_token' => '',
             'telegram_chat_id' => '',
             'excludes' => "backups/*\n.cache/*\ntmp/*",

@@ -169,7 +169,6 @@ window.WNB_EN = {
     'Thêm kho': 'Add destination',
     'Còn trống': 'Free',
     'Kết nối': 'Connection',
-    'Bản sao lưu trên ổ cứng dùng hardlink: mỗi bản chỉ tốn dung lượng cho phần thay đổi. Kho cloud lưu dạng thư mục nên vẫn khôi phục được từng file mà không phải tải cả bản.': 'Local backups use hardlinks: each copy only costs space for what changed. Cloud backups are stored as folders, so single files can be restored without downloading the whole backup.',
     'Tên hiển thị': 'Display name',
     'Ví dụ: Cloudflare R2': 'e.g. Cloudflare R2',
     'Loại kho': 'Type',
@@ -337,5 +336,17 @@ window.WNB_EN = {
     'Ngoài ra luôn bỏ qua {n} reseller trong "Không bao giờ tự sao lưu" (Cài đặt): {list}': 'Also always skips {n} resellers listed in "Never back up automatically" (Settings): {list}',
     'Theo reseller': 'By reseller',
     'Gồm reseller và mọi khách của reseller đó, kể cả khách tạo sau này.': 'Includes the reseller and all of its clients, including clients created later.',
-    'Theo tài khoản': 'By account'
+    'Theo tài khoản': 'By account',
+    'Có nguy cơ mất dữ liệu: {n} vấn đề cần xử lý': 'Risk of data loss: {n} issues need attention',
+    'Chưa cấu hình Telegram hay email nên máy chủ không báo được cho bạn. Hãy thiết lập trong Cài đặt.': 'Telegram and email are not configured, so the server cannot alert you. Set them up in Settings.',
+    'Nén': 'Compressed',
+    'Thư mục': 'Folder',
+    'Bản sao lưu trên ổ cứng dùng hardlink: mỗi bản chỉ tốn dung lượng cho phần thay đổi. Kho cloud kiểu Nén đẩy thẳng bản nén lên cloud: nhanh và gần như không cần chỗ trống trên máy chủ.': 'Local backups use hardlinks: each copy only takes space for what changed. Compressed cloud destinations stream archives straight to the cloud: fast, and almost no free space is needed on the server.',
+    'Cách lưu trên cloud': 'Cloud storage format',
+    'Nén (khuyên dùng): nhanh, không cần chỗ trống trên máy chủ': 'Compressed (recommended): fast, no free space needed on the server',
+    'Thư mục: duyệt và khôi phục từng file trực tiếp, tải lên chậm': 'Folder: browse and restore single files directly, slow uploads',
+    'Nén: home và database được nén rồi đẩy thẳng lên cloud, máy chủ chỉ cần vài trăm MB trống. Khôi phục một file sẽ tải cả bản nén của tài khoản.': 'Compressed: home and databases are compressed and streamed straight to the cloud; the server only needs a few hundred MB free. Restoring a single file downloads the account archive.',
+    'Loại kho này chỉ hỗ trợ kiểu Thư mục (cần chỗ trống trên máy chủ bằng dung lượng tài khoản trong lúc sao lưu).': 'This destination type only supports the Folder format (needs free space on the server equal to the account size during backup).',
+    'Cảnh báo khi có nguy cơ mất dữ liệu (ổ đĩa gần đầy, tài khoản quá hạn chưa sao lưu, lịch không chạy). Nhắc lại mỗi ngày đến khi xử lý xong.': 'Alert on data-loss risks (disk almost full, accounts overdue for backup, schedules not running). Repeated daily until resolved.',
+    'Bản nén: khôi phục file sẽ tải bản nén của tài khoản từ cloud rồi lấy đúng các mục đã chọn, có thể mất vài phút.': 'Compressed backup: restoring files downloads the account archive from the cloud and extracts only the selected items. This may take a few minutes.'
 };
