@@ -333,9 +333,29 @@ final class WNBApi
         $totalMb = 0.0;
         $allBackups = WNBStorage::read('backups');
         $keepTags = WNBEngine::retentionTags($allBackups);
+        $deleted = []; // admin: tài khoản đã bị xóa khỏi DirectAdmin nhưng vẫn còn bản sao lưu
         foreach ($allBackups as $b) {
-            if (!isset($visibleSet[$b['username']]) || !self::ownedByCurrent($role, $b)) {
+            $gone = $role === 'admin' && !isset($visibleSet[$b['username']]) && WNBDirectAdmin::validUsername((string)$b['username']);
+            if (!$gone && (!isset($visibleSet[$b['username']]) || !self::ownedByCurrent($role, $b))) {
                 continue;
+            }
+            if ($gone) {
+                $b['account_deleted'] = true;
+                $d = &$deleted[$b['username']];
+                $d = $d ?? ['username' => $b['username'], 'reseller' => '', 'domain' => '', 'domains' => [], 'databases' => [], 'backups_count' => 0, 'size_mb' => 0.0, 'last_backup_at' => '', 'last_backup_id' => ''];
+                $d['backups_count']++;
+                $d['size_mb'] = round($d['size_mb'] + (float)$b['size_mb'], 1);
+                if ((string)$b['created_at'] > $d['last_backup_at']) {
+                    $d['last_backup_at'] = (string)$b['created_at'];
+                    $d['last_backup_id'] = $b['id'];
+                    $d['reseller'] = (string)($b['reseller'] ?? '');
+                    $d['domain'] = (string)($b['domain'] ?? '');
+                    $d['domains'] = array_values((array)($b['domains'] ?? []));
+                    $d['databases'] = array_values((array)($b['databases'] ?? []));
+                }
+                unset($d);
+            } elseif ($role === 'admin' && self::previousOwner($b)) {
+                $b['previous_owner'] = true;
             }
             $b['keep'] = $keepTags[$b['id']] ?? [];
             unset($b['storage_path'], $b['owner_key'], $b['restic']);
@@ -363,7 +383,7 @@ final class WNBApi
         $failed24 = 0;
         $dayAgo = date('Y-m-d H:i:s', time() - 86400);
         foreach (WNBStorage::read('queue') as $t) {
-            if (!isset($visibleSet[$t['username']]) && !($role === 'admin' && $t['username'] === '')) {
+            if ($role !== 'admin' && !isset($visibleSet[$t['username']])) {
                 continue;
             }
             unset($t['pid'], $t['lang']);
@@ -382,7 +402,7 @@ final class WNBApi
 
         $downloads = [];
         foreach (WNBStorage::read('downloads') as $d) {
-            if (isset($visibleSet[$d['username']]) && self::ownedByCurrent($role, $d)) {
+            if ($role === 'admin' || (isset($visibleSet[$d['username']]) && self::ownedByCurrent($role, $d))) {
                 unset($d['path'], $d['owner_key']);
                 $downloads[] = $d;
             }
@@ -440,6 +460,9 @@ final class WNBApi
             $state['settings']['telegram_configured'] = $settings['telegram_token'] !== '' && $settings['telegram_chat_id'] !== '';
             unset($state['settings']['telegram_token'], $state['settings']['telegram_chat_id']);
             $state['health'] = array_map(fn($i) => WNBLang::render($i['msg']), WNBEngine::healthIssues());
+            $deleted = array_values($deleted);
+            usort($deleted, fn($a, $b) => strcmp($b['last_backup_at'], $a['last_backup_at']));
+            $state['deleted_accounts'] = $deleted;
             $scheduled = []; // tài khoản được ít nhất một lịch đang bật sao lưu
             $state['jobs'] = array_map(function ($j) use (&$scheduled) {
                 $j = array_merge(['filter_mode' => 'exclude', 'exclude_users' => [], 'exclude_resellers' => [], 'include_users' => [], 'include_resellers' => [], 'skip_suspended' => false], $j);
@@ -558,6 +581,19 @@ final class WNBApi
             $keys[$u] = WNBDirectAdmin::ownerKey($u);
         }
         return hash_equals($keys[$u], (string)$rec['owner_key']);
+    }
+
+    /** Bản sao lưu của tài khoản cũ cùng tên (tài khoản đã bị xóa rồi tạo lại). Bản nạp lại từ kho (imported) không xác định được chủ. */
+    private static function previousOwner(array $rec): bool
+    {
+        static $keys = [];
+        $key = (string)($rec['owner_key'] ?? '');
+        if ($key === '' || $key === 'imported') {
+            return false;
+        }
+        $u = $rec['username'];
+        $keys[$u] = $keys[$u] ?? WNBDirectAdmin::ownerKey($u);
+        return !hash_equals($keys[$u], $key);
     }
 
     private static function downloadFor(string $user, string $role, string $id): array

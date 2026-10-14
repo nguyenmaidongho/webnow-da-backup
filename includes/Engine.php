@@ -994,7 +994,7 @@ final class WNBEngine
     private static function applyRetention(array $rec): int
     {
         $policy = self::groupPolicy($rec, WNBStorage::read('jobs'));
-        $matching = array_values(array_filter(WNBStorage::read('backups'), fn($b) => self::groupKey($b) === self::groupKey($rec)));
+        $matching = array_values(array_filter(WNBStorage::read('backups'), fn($b) => self::groupKey($b) === self::groupKey($rec) && !self::otherOwner($b, $rec)));
         usort($matching, fn($a, $b) => strcmp((string)$b['created_at'], (string)$a['created_at']));
         $keep = self::retentionKeep($matching, $policy);
         $remove = array_values(array_filter($matching, fn($b) => !isset($keep[$b['id']]) && !self::backupBusy($b['id'])));
@@ -1006,6 +1006,18 @@ final class WNBEngine
             WNBStorage::update('backups', fn($list) => array_values(array_filter($list, fn($b) => !in_array($b['id'], $ids, true))));
         }
         return count($ids);
+    }
+
+    /**
+     * Bản của tài khoản cũ cùng tên (đã bị xóa rồi tạo lại) không bị chính sách giữ bản của tài khoản mới dọn mất:
+     * lịch sao lưu tài khoản mới (lúc còn trống) trước khi kịp khôi phục thì bản cũ vẫn còn nguyên.
+     */
+    private static function otherOwner(array $b, array $rec): bool
+    {
+        $real = fn($k) => $k !== '' && $k !== 'imported';
+        $x = (string)($b['owner_key'] ?? '');
+        $y = (string)($rec['owner_key'] ?? '');
+        return $real($x) && $real($y) && $x !== $y;
     }
 
     /** Nhóm giữ bản: cùng tài khoản + kho + loại, và cùng lịch (snapshot gom chung). */
@@ -1191,6 +1203,11 @@ final class WNBEngine
         $scope = $task['scope'];
         $sel = self::restoreSelection($b, $acc, $scope, $task['items']);
         $warnings = [];
+        // Tài khoản tạo lại sau khi bị xóa thường chưa có đủ tên miền: email/DNS của các tên miền đó bị bỏ qua.
+        $missing = in_array($scope, ['full', 'emails', 'dns'], true) ? array_values(array_diff((array)$b['domains'], $acc['domains'])) : [];
+        if ($missing) {
+            $warnings[] = WNBLang::msg('Tài khoản chưa có tên miền {domains} nên email và DNS của chúng chưa được khôi phục. Thêm tên miền trong DirectAdmin rồi khôi phục lại phần Email và DNS.', ['domains' => implode(', ', $missing)]);
+        }
         $done = WNBLang::msg('Đã khôi phục {scope} cho {user}', ['scope' => WNBLang::msg(self::scopeKey($scope)), 'user' => $u]);
 
         if (WNB::isPreview()) {
@@ -1199,11 +1216,13 @@ final class WNBEngine
                     WNBStorage::log($task['id'], "Preview: {$k} = " . (is_array($v) ? implode(', ', $v) : 'yes'));
                 }
             }
-            return ['message' => $done, 'warnings' => []];
+            return ['message' => $done, 'warnings' => $warnings];
         }
 
         if (($b['format'] ?? '') === 'restic') {
-            return self::restoreRestic($task, $b, $sel, $done);
+            $res = self::restoreRestic($task, $b, $sel, $done);
+            $res['warnings'] = array_merge($warnings, $res['warnings']);
+            return $res;
         }
         $stage = '';
         $src = $b['storage_path'];

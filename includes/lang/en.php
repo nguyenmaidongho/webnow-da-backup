@@ -206,4 +206,5 @@ return [
     'Mật khẩu kho restic không đúng với kho đã có trên cloud.' => 'The restic password does not match the existing repository in the cloud.',
     'Không tạo được kho restic: {detail}' => 'Cannot create the restic repository: {detail}',
     'Không kết nối được kho restic: {detail}' => 'Cannot open the restic repository: {detail}',
+    'Tài khoản chưa có tên miền {domains} nên email và DNS của chúng chưa được khôi phục. Thêm tên miền trong DirectAdmin rồi khôi phục lại phần Email và DNS.' => 'The account does not have the domains {domains}, so their email and DNS were not restored. Add the domains in DirectAdmin, then restore Email and DNS again.',
 ];

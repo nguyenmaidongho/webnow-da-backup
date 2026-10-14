@@ -7,6 +7,10 @@ WNBApi::handle('admin', 'admin', ['action' => 'job_toggle', 'id' => 'job_daily',
 foreach (['admin', 'reseller_vn', 'shopgiay', 'shopgiay', 'shopgiay', 'reseller_vn'] as $u) {
     WNBApi::handle('admin', 'admin', ['action' => 'backup_now', 'username' => $u, 'destination_id' => 'dest_local', 'csrf' => $ac]);
 }
+// Tài khoản chỉ tồn tại lúc seed: ở preview nó thành "Tài khoản đã xóa" (vẫn còn bản sao lưu).
+WNBDirectAdmin::$demoExtra = ['quancafe' => ['username' => 'quancafe', 'usertype' => 'user', 'creator' => 'reseller_vn', 'domain' => 'quancafe.vn', 'domains' => ['quancafe.vn', 'cafe-sach.vn'],
+    'package' => '', 'suspended' => false, 'quota_mb' => 0, 'usage_mb' => 640.0, 'databases' => ['quancafe_wp'], 'emails' => ['info@quancafe.vn'], 'crons' => []]];
+WNBApi::handle('admin', 'admin', ['action' => 'backup_now', 'username' => 'quancafe', 'destination_id' => 'dest_local', 'csrf' => $ac]);
 WNBApi::handle('shopgiay', 'user', ['action' => 'snapshot', 'note' => 'Trước khi cập nhật WooCommerce 9.3', 'csrf' => WNBApi::csrfToken('shopgiay', 'user')]);
 
 // Dàn thời gian cho giống thực tế

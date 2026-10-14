@@ -651,18 +651,83 @@
         return '<div class="card"><div class="card-head"><div class="card-title">' + esc(t('Tài khoản')) + ' <span class="badge">' + S.accounts.length + '</span></div>' +
             '<div class="row-wrap right">' + destSel + '<div class="input-search">' + ic('search') + '<input class="input" type="search" placeholder="' + esc(t('Tìm tài khoản hoặc tên miền')) + '" value="' + esc(ui.search) + '" data-bind="search"></div></div></div>' +
             (list.length ? '<div class="table-wrap"><table class="t"><thead><tr><th>' + esc(t('Tài khoản')) + '</th><th class="hide-sm">' + esc(t('Loại')) + '</th><th class="num hide-sm">' + esc(t('Dung lượng')) + '</th><th>' + esc(t('Sao lưu gần nhất')) + '</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-                : empty('search', t('Không tìm thấy tài khoản'), q ? t('Thử từ khóa khác.') : '')) + '</div>';
+                : empty('search', t('Không tìm thấy tài khoản'), q ? t('Thử từ khóa khác.') : '')) + '</div>' + deletedAccountsCard(q);
+    }
+
+    function deletedAccount(u) {
+        var list = S.deleted_accounts || [];
+        for (var i = 0; i < list.length; i++) if (list[i].username === u) return list[i];
+        return null;
+    }
+
+    /** Admin: tài khoản đã bị xóa khỏi DirectAdmin nhưng bản sao lưu vẫn còn. */
+    function deletedAccountsCard(q) {
+        var list = (S.deleted_accounts || []).filter(function (a) { return !q || a.username.toLowerCase().indexOf(q) !== -1 || (a.domain || '').toLowerCase().indexOf(q) !== -1; });
+        if (!list.length) return '';
+        var rows = list.map(function (a) {
+            return '<tr><td><div class="cell-main">' + esc(a.username) + ' <span class="badge bad">' + esc(t('Đã xóa')) + '</span></div><div class="cell-sub">' + esc(a.domain || '—') + '</div></td>' +
+                '<td class="hide-sm">' + (a.reseller ? esc(a.reseller) : '—') + '</td>' +
+                '<td class="num hide-sm">' + fmtMb(a.size_mb) + '</td>' +
+                '<td><div>' + esc(fmtRel(a.last_backup_at)) + '</div><div class="cell-sub">' + esc(t('{n} bản', { n: a.backups_count })) + '</div></td>' +
+                '<td class="actions"><button class="btn btn-sm" data-act="deleted-backups" data-user="' + esc(a.username) + '">' + ic('archive') + esc(t('Xem bản sao lưu')) + '</button>' +
+                (perm('can_restore') ? '<button class="btn btn-sm btn-primary" data-act="deleted-restore" data-user="' + esc(a.username) + '">' + ic('restore') + esc(t('Khôi phục')) + '</button>' : '') +
+                '</td></tr>';
+        }).join('');
+        return '<div style="height:16px"></div><div class="card"><div class="card-head"><div class="card-title">' + esc(t('Tài khoản đã xóa')) + ' <span class="badge">' + list.length + '</span></div>' +
+            '<span class="muted small right">' + esc(t('Đã bị xóa khỏi DirectAdmin, bản sao lưu vẫn được giữ cho tới khi bạn xóa.')) + '</span></div>' +
+            '<div class="table-wrap"><table class="t"><thead><tr><th>' + esc(t('Tài khoản')) + '</th><th class="hide-sm">' + esc(t('Chủ sở hữu')) + '</th><th class="num hide-sm">' + esc(t('Dung lượng')) + '</th><th>' + esc(t('Sao lưu gần nhất')) + '</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+    }
+
+    /** Khôi phục tài khoản đã xóa: plugin không tự tạo tài khoản DirectAdmin, hướng dẫn tạo lại rồi khôi phục toàn bộ. */
+    function deletedRestoreModal(u) {
+        var a = deletedAccount(u);
+        if (!a) { openRestoreModal(u); return; }
+        var extra = a.domains.filter(function (d) { return d !== a.domain; });
+        var chips = function (list) { return '<div class="chips">' + list.map(function (x) { return '<code>' + esc(x) + '</code>'; }).join('') + '</div>'; };
+        var steps = '<li><strong>' + esc(t('Tạo lại tài khoản trong DirectAdmin')) + '</strong>' +
+            esc(a.reseller && a.reseller !== 'admin' ? t('Đúng tên đăng nhập bên dưới, đặt dưới reseller {r}, tên miền chính như cũ.', { r: a.reseller }) : t('Đúng tên đăng nhập bên dưới, tên miền chính như cũ.')) +
+            chips([u].concat(a.domain ? [a.domain] : [])) + '</li>';
+        if (extra.length) steps += '<li><strong>' + esc(t('Thêm lại các tên miền khác')) + '</strong>' + esc(t('Email và DNS chỉ khôi phục được cho tên miền đã có trong tài khoản.')) + chips(extra) + '</li>';
+        steps += '<li><strong>' + esc(t('Khôi phục toàn bộ')) + '</strong>' + esc(t('Bấm "Đã tạo lại, khôi phục" rồi chọn Toàn bộ: file, database, email, DNS và cron được đưa về như lúc sao lưu.')) + '</li>';
+        if (a.databases.length) steps += '<li><strong>' + esc(t('Gán lại user database')) + '</strong>' + esc(t('Database được tạo lại nhưng user database thì không. Tạo user database trong DirectAdmin với mật khẩu cũ (xem trong file cấu hình website, ví dụ wp-config.php).')) + chips(a.databases) + '</li>';
+        var m = openModal({
+            title: t('Khôi phục tài khoản đã xóa {user}', { user: u }),
+            sub: esc(t('{n} bản sao lưu, gần nhất {when}', { n: a.backups_count, when: fmtDate(a.last_backup_at) })),
+            body: '<div class="banner warn">' + ic('alert', 'i-lg') + '<div><strong>' + esc(t('Tài khoản {user} không còn trong DirectAdmin', { user: u })) + '</strong>' +
+                esc(t('Bản sao lưu vẫn còn nguyên nhưng chỉ khôi phục được vào tài khoản đang tồn tại. WebNowBackup không tự tạo tài khoản DirectAdmin, hãy làm theo các bước sau.')) + '</div></div>' +
+                '<ol class="steps">' + steps + '</ol>',
+            foot: (perm('can_download') ? '<button class="btn" data-dl>' + ic('download') + esc(t('Tải về bản mới nhất')) + '</button>' : '') +
+                '<span class="grow"></span><button class="btn" data-no>' + esc(t('Đóng')) + '</button><button class="btn btn-primary" data-recheck>' + ic('restore') + esc(t('Đã tạo lại, khôi phục')) + '</button>'
+        });
+        m.el.querySelector('[data-no]').onclick = m.close;
+        var dl = m.el.querySelector('[data-dl]');
+        if (dl) dl.onclick = function () { m.close(); run(null, api('download_create', { backup_id: a.last_backup_id })).then(null, function () { /* run đã báo lỗi */ }); };
+        var re = m.el.querySelector('[data-recheck]');
+        re.onclick = function () {
+            run(re, api('state')).then(function () {
+                if (S.accounts.some(function (x) { return x.username === u; })) {
+                    m.close();
+                    openRestoreModal(u, a.last_backup_id);
+                } else {
+                    toast(t('Chưa thấy tài khoản {user} trong DirectAdmin. Tạo lại tài khoản rồi thử lại.', { user: u }), true);
+                }
+            }, function () { /* run đã báo lỗi */ });
+        };
     }
 
     /* ============================== Bản sao lưu ============================== */
 
     function viewBackups() {
         var users = S.accounts.map(function (a) { return a.username; });
+        var gone = (S.deleted_accounts || []).map(function (a) { return a.username; });
+        if (ui.bkUser === '*deleted' ? !gone.length : ui.bkUser && users.indexOf(ui.bkUser) === -1 && gone.indexOf(ui.bkUser) === -1) ui.bkUser = '';
         var list = S.backups.filter(function (b) {
-            return (!ui.bkUser || b.username === ui.bkUser) && (!ui.bkType || (ui.bkType === 'snapshot' ? b.type === 'snapshot' : b.type !== 'snapshot'));
+            return (!ui.bkUser || (ui.bkUser === '*deleted' ? b.account_deleted : b.username === ui.bkUser)) && (!ui.bkType || (ui.bkType === 'snapshot' ? b.type === 'snapshot' : b.type !== 'snapshot'));
         });
+        var opt = function (u) { return '<option' + (ui.bkUser === u ? ' selected' : '') + '>' + esc(u) + '</option>'; };
         var filters = '<div class="row-wrap right"><select class="select" style="width:auto" data-bind="bkUser"><option value="">' + esc(t('Tất cả tài khoản')) + '</option>' +
-            users.map(function (u) { return '<option' + (ui.bkUser === u ? ' selected' : '') + '>' + esc(u) + '</option>'; }).join('') + '</select>' +
+            (gone.length ? '<option value="*deleted"' + (ui.bkUser === '*deleted' ? ' selected' : '') + '>' + esc(t('Mọi tài khoản đã xóa ({n})', { n: gone.length })) + '</option><optgroup label="' + esc(t('Đang hoạt động')) + '">' + users.map(opt).join('') + '</optgroup><optgroup label="' + esc(t('Đã xóa')) + '">' + gone.map(opt).join('') + '</optgroup>'
+                : users.map(opt).join('')) + '</select>' +
             '<select class="select" style="width:auto" data-bind="bkType"><option value="">' + esc(t('Mọi loại')) + '</option><option value="backup"' + (ui.bkType === 'backup' ? ' selected' : '') + '>' + esc(t('Sao lưu')) + '</option><option value="snapshot"' + (ui.bkType === 'snapshot' ? ' selected' : '') + '>Snapshot</option></select></div>';
         var rows = list.map(function (b) {
             var content = [];
@@ -670,13 +735,13 @@
             if (b.emails.length) content.push(ic('mail') + ' ' + b.emails.length);
             if (b.domains.length) content.push(ic('globe') + ' ' + b.domains.length);
             return '<tr><td><div class="cell-main nowrap">' + esc(fmtDate(b.created_at)) + '</div><div class="cell-sub">' + esc(fmtRel(b.created_at)) + '</div></td>' +
-                '<td><div class="cell-main">' + esc(b.username) + '</div><div class="cell-sub">' + esc(b.domain || '') + '</div></td>' +
-                '<td>' + typeBadge(b) + keepBadges(b) + (b.warnings && b.warnings.length ? ' <span class="badge warn" title="' + esc(b.warnings.join('\n')) + '">' + esc(t('{n} cảnh báo', { n: b.warnings.length })) + '</span>' : '') + (b.note && b.type === 'snapshot' ? '<div class="cell-sub ellipsis" style="max-width:220px">' + esc(b.note) + '</div>' : '') + '</td>' +
+                '<td><div class="cell-main">' + esc(b.username) + (b.account_deleted ? ' <span class="badge bad" title="' + esc(t('Tài khoản đã bị xóa khỏi DirectAdmin')) + '">' + esc(t('Đã xóa')) + '</span>' : '') + '</div><div class="cell-sub">' + esc(b.domain || '') + '</div></td>' +
+                '<td>' + typeBadge(b) + keepBadges(b) + (b.previous_owner ? ' <span class="badge warn" title="' + esc(t('Tạo trước khi tài khoản bị xóa rồi tạo lại cùng tên. Chỉ admin thấy bản này.')) + '">' + esc(t('Tài khoản cũ')) + '</span>' : '') + (b.warnings && b.warnings.length ? ' <span class="badge warn" title="' + esc(b.warnings.join('\n')) + '">' + esc(t('{n} cảnh báo', { n: b.warnings.length })) + '</span>' : '') + (b.note && b.type === 'snapshot' ? '<div class="cell-sub ellipsis" style="max-width:220px">' + esc(b.note) + '</div>' : '') + '</td>' +
                 '<td class="hide-sm">' + esc(nameOf(b.destination_name)) + '</td>' +
                 '<td class="num">' + fmtMb(b.size_mb) + (b.incremental ? '<div class="cell-sub">' + esc(t('mới {size}', { size: fmtMb(b.new_mb) })) + '</div>' : '') + '</td>' +
                 '<td class="hide-sm muted nowrap">' + content.join('&nbsp;&nbsp;') + '</td>' +
                 '<td class="actions">' +
-                (perm('can_restore') ? '<button class="btn btn-sm btn-primary" data-act="open-restore" data-user="' + esc(b.username) + '" data-backup="' + esc(b.id) + '">' + ic('restore') + esc(t('Khôi phục')) + '</button>' : '') +
+                (perm('can_restore') ? '<button class="btn btn-sm btn-primary" data-act="' + (b.account_deleted ? 'deleted-restore' : 'open-restore') + '" data-user="' + esc(b.username) + '" data-backup="' + esc(b.id) + '">' + ic('restore') + esc(t('Khôi phục')) + '</button>' : '') +
                 (perm('can_download') ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="download-create" data-backup="' + esc(b.id) + '" title="' + esc(t('Đóng gói để tải về')) + '" aria-label="' + esc(t('Tải về')) + '">' + ic('download') + '</button>' : '') +
                 (perm('can_backup') ? '<button class="btn btn-sm btn-ghost btn-icon danger" data-act="backup-delete" data-backup="' + esc(b.id) + '" title="' + esc(t('Xóa')) + '" aria-label="' + esc(t('Xóa')) + '">' + ic('trash') + '</button>' : '') +
                 '</td></tr>';
@@ -1195,19 +1260,29 @@
             case 'databases':
                 return pickList(b.databases, 'database', t('Bản sao lưu này không có database.'), t('Database được import đè lên database hiện tại cùng tên. Database đã bị xóa sẽ được tạo lại (cần gán lại user database trong DirectAdmin).'), canR);
             case 'emails':
-                return pickList(b.emails, 'mail', t('Bản sao lưu này không có hộp thư.'), t('Khôi phục thư trong hộp thư. Thư hiện có được giữ nguyên; hộp thư đã bị xóa sẽ được tạo lại.'), canR);
+                return missingDomainsNote(b) + pickList(b.emails, 'mail', t('Bản sao lưu này không có hộp thư.'), t('Khôi phục thư trong hộp thư. Thư hiện có được giữ nguyên; hộp thư đã bị xóa sẽ được tạo lại.'), canR);
             case 'dns':
-                return pickList(b.domains, 'globe', t('Bản sao lưu này không có DNS zone.'), t('Bản ghi DNS của tên miền được thay bằng bản trong bản sao lưu.'), canR);
+                return missingDomainsNote(b) + pickList(b.domains, 'globe', t('Bản sao lưu này không có DNS zone.'), t('Bản ghi DNS của tên miền được thay bằng bản trong bản sao lưu.'), canR);
             case 'cron':
                 return (b.crons.length ? '<div class="picks">' + b.crons.map(function (c) { return '<div class="cron-line">' + esc(c) + '</div>'; }).join('') + '</div>' : '<div class="empty" style="padding:20px">' + esc(t('Bản sao lưu không có cron job nào.')) + '</div>') +
                     '<div class="sel-bar"><span class="grow muted small">' + esc(t('Danh sách cron job hiện tại sẽ được thay bằng danh sách trên.')) + '</span><button class="btn btn-primary" data-act="restore-cron"' + (canR ? '' : ' disabled') + '>' + ic('restore') + esc(t('Khôi phục cron')) + '</button></div>';
             case 'full':
-                return '<div class="danger-box">' +
+                return missingDomainsNote(b) + '<div class="danger-box">' +
                     '<div class="cell-main" style="margin-bottom:6px">' + ic('alert') + ' ' + esc(t('Khôi phục toàn bộ tài khoản {user} về {date}', { user: b.username, date: fmtDate(b.created_at) })) + '</div>' +
                     '<ul style="margin:0;padding-left:18px;line-height:1.8"><li>' + esc(t('Toàn bộ file trong thư mục home được ghi đè bằng bản sao lưu (file mới tạo sau thời điểm này vẫn được giữ).')) + '</li><li>' + esc(t('{n} database được import lại.', { n: b.databases.length })) + '</li><li>' + esc(t('{e} hộp thư, {d} DNS zone và cron job được khôi phục.', { e: b.emails.length, d: b.domains.length })) + '</li></ul></div>' +
                     '<div class="sel-bar"><span class="grow muted small">' + esc(t('Nên khôi phục từng phần nếu chỉ cần lấy lại vài file hoặc một database.')) + '</span><button class="btn btn-danger" data-act="restore-full"' + (canR ? '' : ' disabled') + '>' + ic('restore') + esc(t('Khôi phục toàn bộ')) + '</button></div>';
         }
         return '';
+    }
+
+    /** Tên miền có trong bản sao lưu nhưng tài khoản hiện chưa có (thường gặp khi tài khoản bị xóa rồi tạo lại). */
+    function missingDomainsNote(b) {
+        var acc = null;
+        S.accounts.forEach(function (a) { if (a.username === b.username) acc = a; });
+        var missing = acc ? b.domains.filter(function (d) { return (acc.domains || []).indexOf(d) === -1; }) : [];
+        if (!missing.length) return '';
+        return '<div class="banner warn">' + ic('alert', 'i-lg') + '<div><strong>' + esc(t('Tài khoản chưa có {n} tên miền của bản sao lưu', { n: missing.length })) + '</strong>' +
+            esc(t('Email và DNS của {domains} sẽ bị bỏ qua. Thêm các tên miền này trong DirectAdmin trước khi khôi phục.', { domains: missing.join(', ') })) + '</div></div>';
     }
 
     function pickList(items, icon, emptyText, note, canR) {
@@ -1350,6 +1425,13 @@
                 break;
             case 'open-restore':
                 openRestoreModal(d.user, d.backup);
+                break;
+            case 'deleted-restore':
+                deletedRestoreModal(d.user);
+                break;
+            case 'deleted-backups':
+                ui.bkUser = d.user;
+                goTab('backups');
                 break;
             case 'download-create':
                 run(el, api('download_create', { backup_id: d.backup }));

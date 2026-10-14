@@ -354,3 +354,13 @@
 @media (prefers-reduced-motion: reduce) {
     .wnb *, .wnb *::before, .wnb *::after { animation: none !important; transition: none !important; }
 }
+
+/* Hướng dẫn khôi phục tài khoản đã xóa */
+.steps { margin: 0; padding: 0; list-style: none; counter-reset: wnb-step; }
+.steps > li { position: relative; padding: 0 0 14px 38px; counter-increment: wnb-step; font-size: 13.5px; line-height: 1.6; }
+.steps > li:last-child { padding-bottom: 0; }
+.steps > li::before { content: counter(wnb-step); position: absolute; left: 0; top: -1px; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); font-weight: 700; font-size: 12.5px; }
+.steps > li:not(:last-child)::after { content: ""; position: absolute; left: 11.5px; top: 27px; bottom: 3px; width: 1px; background: var(--border); }
+.steps strong { display: block; }
+.steps .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.steps .chips code { padding: 2px 8px; border-radius: 4px; background: var(--surface-3); }
