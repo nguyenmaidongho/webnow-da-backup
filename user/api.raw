@@ -1,0 +1,4 @@
+#!/usr/local/bin/php -n
+<?php
+require_once dirname(__DIR__) . '/includes/bootstrap.php';
+WNBClient::serveRaw('user');

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webnowbackup-preview",
+      "runtimeExecutable": "C:/laragon/bin/php/php-8.3.30-Win32-vs16-x64/php.exe",
+      "runtimeArgs": ["-S", "127.0.0.1:8088", "router.php"],
+      "port": 8088
+    },
+    {
+      "name": "webnowbackup-preview-2",
+      "runtimeExecutable": "C:/laragon/bin/php/php-8.3.30-Win32-vs16-x64/php.exe",
+      "runtimeArgs": ["-S", "127.0.0.1:8089", "router.php"],
+      "port": 8089
+    }
+  ]
+}
