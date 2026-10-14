@@ -523,6 +523,8 @@ final class WNBEngine
                 'databases' => $dumped,
                 'emails' => $acc['emails'],
                 'crons' => $acc['crons'],
+                'subdomains' => $acc['subdomains'],
+                'pointers' => $acc['pointers'],
                 'incremental' => (bool)$prev,
                 'size_mb' => $fullMb,
                 'new_mb' => $newMb,
@@ -671,6 +673,7 @@ final class WNBEngine
             file_put_contents($work . '/manifest.json', json_encode([
                 'id' => $id, 'username' => $u, 'reseller' => $acc['creator'], 'domain' => $acc['domain'], 'domains' => $acc['domains'],
                 'type' => $isSnap ? 'snapshot' : 'backup', 'databases' => $dumped, 'emails' => $acc['emails'], 'crons' => $acc['crons'],
+                'subdomains' => $acc['subdomains'], 'pointers' => $acc['pointers'],
                 'job_id' => $task['job_id'], 'note' => $task['note'], 'created_at' => WNB::now(), 'host' => $host,
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
 
@@ -740,6 +743,8 @@ final class WNBEngine
             'databases' => $dumped,
             'emails' => $acc['emails'],
             'crons' => $acc['crons'],
+            'subdomains' => $acc['subdomains'],
+            'pointers' => $acc['pointers'],
             'incremental' => (bool)$parent,
             'size_mb' => round($bytes / 1048576, 1),
             'new_mb' => round($added / 1048576, 1),
@@ -784,6 +789,13 @@ final class WNBEngine
                 @copy($zone, $work . '/dns/' . $d . '.db');
             } else {
                 $warnings[] = WNBLang::msg('Không thấy DNS zone của {domain}.', ['domain' => $d]);
+            }
+        }
+        // Pointer kiểu alias có zone riêng; kiểu chuyển hướng thì không.
+        foreach ($acc['pointers'] as $p) {
+            $zone = WNBDirectAdmin::zoneFile($p['name']);
+            if ($p['alias'] && is_file($zone)) {
+                @copy($zone, $work . '/dns/' . $p['name'] . '.db');
             }
         }
         foreach ($acc['domains'] as $d) {
@@ -1175,6 +1187,7 @@ final class WNBEngine
             'format' => WNBRclone::destFormat($dest), 'home_archive' => true,
             'job_id' => $task['job_id'], 'note' => $task['note'],
             'databases' => $acc['databases'], 'emails' => $acc['emails'], 'crons' => $acc['crons'],
+            'subdomains' => $acc['subdomains'], 'pointers' => $acc['pointers'],
             'incremental' => false, 'size_mb' => $size, 'new_mb' => round($size * 0.08, 1),
             'warnings' => [], 'created_at' => WNB::now(), 'storage_path' => $work,
         ];
@@ -1207,6 +1220,17 @@ final class WNBEngine
         $missing = in_array($scope, ['full', 'emails', 'dns'], true) ? array_values(array_diff((array)$b['domains'], $acc['domains'])) : [];
         if ($missing) {
             $warnings[] = WNBLang::msg('Tài khoản chưa có tên miền {domains} nên email và DNS của chúng chưa được khôi phục. Thêm tên miền trong DirectAdmin rồi khôi phục lại phần Email và DNS.', ['domains' => implode(', ', $missing)]);
+        }
+        // Subdomain/pointer nằm trong cấu hình DirectAdmin, plugin không tạo lại: chỉ nhắc khi khôi phục toàn bộ.
+        if ($scope === 'full') {
+            $subs = array_values(array_diff((array)($b['subdomains'] ?? []), $acc['subdomains']));
+            if ($subs) {
+                $warnings[] = WNBLang::msg('Tài khoản chưa có subdomain {list}. File đã được khôi phục nhưng các subdomain này chỉ chạy lại sau khi tạo lại trong DirectAdmin.', ['list' => implode(', ', $subs)]);
+            }
+            $ptrs = array_values(array_diff(array_column((array)($b['pointers'] ?? []), 'name'), array_column($acc['pointers'], 'name')));
+            if ($ptrs) {
+                $warnings[] = WNBLang::msg('Tài khoản chưa có domain pointer {list}. Tạo lại pointer trong DirectAdmin để các tên miền này trỏ về website.', ['list' => implode(', ', $ptrs)]);
+            }
         }
         $done = WNBLang::msg('Đã khôi phục {scope} cho {user}', ['scope' => WNBLang::msg(self::scopeKey($scope)), 'user' => $u]);
 
@@ -1921,7 +1945,7 @@ final class WNBEngine
                 $man = json_decode(implode("
 ", $m), true);
                 if (is_array($man)) {
-                    foreach (['reseller', 'domain', 'domains', 'emails', 'crons', 'note'] as $k) {
+                    foreach (['reseller', 'domain', 'domains', 'emails', 'crons', 'subdomains', 'pointers', 'note'] as $k) {
                         if (isset($man[$k])) {
                             $records[$i][$k] = $man[$k];
                         }
@@ -2127,8 +2151,8 @@ final class WNBEngine
                 return;
             }
             WNBLang::set((string)WNBStorage::settings()['language']);
-            $title = wnb_t('[WebNowBackup] Lịch "{job}": {done}/{total} thành công, {failed} lỗi', ['job' => $job['name'], 'done' => $stats['done'], 'total' => $stats['total'], 'failed' => $stats['failed']]);
-            $body = $title . "\n" . wnb_t('Máy chủ: {host}', ['host' => self::hostname()]) . "\n";
+            $title = wnb_t('Lịch "{job}": {done}/{total} thành công, {failed} lỗi', ['job' => $job['name'], 'done' => $stats['done'], 'total' => $stats['total'], 'failed' => $stats['failed']]);
+            $body = '';
             if ($skipped) {
                 $body .= wnb_t('Bỏ qua {n} tài khoản đang có tác vụ chạy.', ['n' => $skipped]) . "\n";
             }
@@ -2321,14 +2345,14 @@ final class WNBEngine
         }
         if ($send !== '' && !empty(WNBStorage::settings()['notify_health'])) {
             if ($send === 'alert') {
-                $title = wnb_t('[WebNowBackup] Cảnh báo sao lưu trên {host}: {n} vấn đề', ['host' => self::hostname(), 'n' => count($issues)]);
-                $body = $title . "\n";
+                $title = wnb_t('Cảnh báo sao lưu: {n} vấn đề', ['n' => count($issues)]);
+                $body = '';
                 foreach ($issues as $i) {
                     $body .= '• ' . WNBLang::render($i['msg']) . "\n";
                 }
             } else {
-                $title = wnb_t('[WebNowBackup] {host}: sao lưu đã hoạt động bình thường trở lại', ['host' => self::hostname()]);
-                $body = $title . "\n";
+                $title = wnb_t('Sao lưu đã hoạt động bình thường trở lại');
+                $body = '';
             }
             self::notify($title, $body);
             $state['sent_at'] = $now;
@@ -2341,9 +2365,33 @@ final class WNBEngine
 
     /* ============================== Thông báo ============================== */
 
-    private static function hostname(): string
+    public static function hostname(): string
     {
         return trim((string)@file_get_contents('/etc/hostname')) ?: (gethostname() ?: 'server');
+    }
+
+    /** Tên máy chủ trong thông báo: tên đặt trong Cài đặt (kèm hostname), mặc định là hostname. */
+    public static function serverLabel(): string
+    {
+        $name = trim((string)(WNBStorage::settings()['server_name'] ?? ''));
+        $host = self::hostname();
+        return $name === '' || strcasecmp($name, $host) === 0 ? $host : $name . ' (' . $host . ')';
+    }
+
+    /**
+     * Dựng thông báo cho từng kênh; mọi tin đều mang tên máy chủ để phân biệt khi nhiều máy chủ gửi về một nơi.
+     * @return array{subject: string, email: string, telegram: string} telegram dạng HTML (parse_mode=HTML)
+     */
+    public static function message(string $title, string $details): array
+    {
+        $label = self::serverLabel();
+        $details = rtrim($details);
+        $h = fn(string $s) => htmlspecialchars($s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        return [
+            'subject' => '[WebNowBackup · ' . $label . '] ' . $title,
+            'email' => $title . "\n" . wnb_t('Máy chủ: {host}', ['host' => $label]) . "\n" . ($details !== '' ? "\n" . $details . "\n" : ''),
+            'telegram' => '🖥 <b>' . $h($label) . '</b>' . "\n" . '<b>' . $h($title) . '</b>' . ($details !== '' ? "\n" . $h(mb_strimwidth_safe($details, 3500)) : ''),
+        ];
     }
 
     /** Lỗi của tác vụ lẻ (không thuộc lịch). */
@@ -2353,25 +2401,26 @@ final class WNBEngine
             return;
         }
         WNBLang::set((string)WNBStorage::settings()['language']);
-        $title = wnb_t('[WebNowBackup] Lỗi {type} {user} trên {host}', ['type' => $task['type'], 'user' => $task['username'], 'host' => self::hostname()]);
-        $body = $title . "\n" . wnb_t('Tác vụ: {id}', ['id' => $task['id']]) . "\n" . wnb_t('Lỗi: {error}', ['error' => WNBLang::render($msg)]) . "\n";
+        $title = wnb_t('Lỗi {type} {user}', ['type' => $task['type'], 'user' => $task['username']]);
+        $body = wnb_t('Tác vụ: {id}', ['id' => $task['id']]) . "\n" . wnb_t('Lỗi: {error}', ['error' => WNBLang::render($msg)]) . "\n";
         self::notify($title, $body);
     }
 
-    /** Gửi qua mọi kênh đã cấu hình. Trả về kết quả từng kênh. */
-    public static function notify(string $title, string $body): array
+    /** Gửi qua mọi kênh đã cấu hình. $details: các dòng chi tiết dưới tiêu đề. Trả về kết quả từng kênh. */
+    public static function notify(string $title, string $details): array
     {
         $res = [];
         if (WNB::isPreview()) {
             return ['preview' => true];
         }
         $s = WNBStorage::settings();
+        $msg = self::message($title, $details);
         $to = trim((string)$s['notify_email']);
         if (filter_var($to, FILTER_VALIDATE_EMAIL)) {
-            $res['email'] = @mail($to, '=?UTF-8?B?' . base64_encode($title) . '?=', $body, "Content-Type: text/plain; charset=UTF-8\r\n");
+            $res['email'] = @mail($to, '=?UTF-8?B?' . base64_encode($msg['subject']) . '?=', $msg['email'], "Content-Type: text/plain; charset=UTF-8\r\n");
         }
         if ($s['telegram_token'] !== '' && $s['telegram_chat_id'] !== '') {
-            $res['telegram'] = self::telegram((string)$s['telegram_token'], (string)$s['telegram_chat_id'], $body);
+            $res['telegram'] = self::telegram((string)$s['telegram_token'], (string)$s['telegram_chat_id'], $msg['telegram'], true);
         }
         return $res;
     }
@@ -2380,7 +2429,7 @@ final class WNBEngine
      * Gửi Telegram bằng curl; URL chứa token được đưa qua stdin (-K -) để không lộ trên danh sách tiến trình.
      * @return true|string true hoặc nội dung lỗi
      */
-    public static function telegram(string $token, string $chatId, string $text)
+    public static function telegram(string $token, string $chatId, string $text, bool $html = false)
     {
         $curl = WNBShell::which('curl');
         if ($curl === '') {
@@ -2389,7 +2438,8 @@ final class WNBEngine
         $q = fn(string $v) => '"' . str_replace(["\\", '"', "\r", "\n"], ["\\\\", '\\"', '', '\\n'], $v) . '"';
         $cfg = 'url = ' . $q('https://api.telegram.org/bot' . $token . '/sendMessage') . "\n"
             . 'data-urlencode = ' . $q('chat_id=' . $chatId) . "\n"
-            . 'data-urlencode = ' . $q('text=' . mb_strimwidth_safe($text, 3800)) . "\n"
+            . 'data-urlencode = ' . $q('text=' . ($html ? $text : mb_strimwidth_safe($text, 3800))) . "\n"
+            . ($html ? 'data = "parse_mode=HTML"' . "\n" : '')
             . 'data = "disable_web_page_preview=true"' . "\n"
             . "max-time = 20\nsilent\nshow-error\n";
         $code = WNBShell::runWithInput(escapeshellarg($curl) . ' -K -', $cfg, $out);

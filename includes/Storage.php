@@ -134,6 +134,7 @@ final class WNBStorage
             'exclude_resellers' => [],
             'language' => 'vi',
             'notify_email' => '',
+            'server_name' => '',
             'notify_on_failure' => true,
             'notify_job_report' => 'errors',
             'notify_health' => true,

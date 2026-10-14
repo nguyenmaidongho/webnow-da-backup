@@ -688,8 +688,15 @@
             esc(a.reseller && a.reseller !== 'admin' ? t('Đúng tên đăng nhập bên dưới, đặt dưới reseller {r}, tên miền chính như cũ.', { r: a.reseller }) : t('Đúng tên đăng nhập bên dưới, tên miền chính như cũ.')) +
             chips([u].concat(a.domain ? [a.domain] : [])) + '</li>';
         if (extra.length) steps += '<li><strong>' + esc(t('Thêm lại các tên miền khác')) + '</strong>' + esc(t('Email và DNS chỉ khôi phục được cho tên miền đã có trong tài khoản.')) + chips(extra) + '</li>';
+        var subs = a.subdomains || [], ptrs = a.pointers || [];
+        if (subs.length || ptrs.length) {
+            steps += '<li><strong>' + esc(t('Tạo lại subdomain và domain pointer')) + '</strong>' + esc(t('Plugin không tạo lại các mục này. File của subdomain vẫn được khôi phục vào đúng thư mục cũ.')) +
+                (subs.length ? chips(subs) : '') +
+                (ptrs.length ? chips(ptrs.map(function (x) { return x.name + ' → ' + x.target + (x.alias ? '' : ' (' + t('chuyển hướng') + ')'); })) : '') + '</li>';
+        }
         steps += '<li><strong>' + esc(t('Khôi phục toàn bộ')) + '</strong>' + esc(t('Bấm "Đã tạo lại, khôi phục" rồi chọn Toàn bộ: file, database, email, DNS và cron được đưa về như lúc sao lưu.')) + '</li>';
         if (a.databases.length) steps += '<li><strong>' + esc(t('Gán lại user database')) + '</strong>' + esc(t('Database được tạo lại nhưng user database thì không. Tạo user database trong DirectAdmin với mật khẩu cũ (xem trong file cấu hình website, ví dụ wp-config.php).')) + chips(a.databases) + '</li>';
+        steps += '<li><strong>' + esc(t('Cấp lại SSL')) + '</strong>' + esc(t('Chứng chỉ SSL không được khôi phục. Bật lại Let\'s Encrypt (hoặc cài lại chứng chỉ) cho các tên miền và subdomain ở trên.')) + '</li>';
         var m = openModal({
             title: t('Khôi phục tài khoản đã xóa {user}', { user: u }),
             sub: esc(t('{n} bản sao lưu, gần nhất {when}', { n: a.backups_count, when: fmtDate(a.last_backup_at) })),
@@ -1106,6 +1113,8 @@
             fieldInput('download_ttl_hours', t('Giữ file tải về (giờ)'), s.download_ttl_hours, '', '', 'number') +
             '</div></div>' +
             '<div class="card"><div class="card-head"><div class="card-title">' + esc(t('Thông báo')) + '</div><button type="button" class="btn btn-sm right" data-act="notify-test">' + ic('check') + esc(t('Gửi thử')) + '</button></div><div class="card-body form-grid">' +
+            '<div class="field full"><label>' + esc(t('Tên máy chủ trong thông báo')) + '</label><input class="input" name="server_name" maxlength="60" value="' + esc(s.server_name || '') + '" placeholder="' + esc(S.server_host || '') + '">' +
+            '<div class="hint">' + esc(t('Hiện ở đầu mọi tin Telegram và tiêu đề email để phân biệt khi nhiều máy chủ gửi về cùng một nơi. Để trống thì dùng hostname {host}.', { host: S.server_host || '' })) + '</div></div>' +
             '<div class="field full"><label>Telegram</label><div class="secret-state">' + (s.telegram_configured ? '<span class="badge ok">' + ic('check') + esc(t('Đã cấu hình')) + '</span><span class="muted small">' + esc(t('Token và Chat ID được giấu. Nhập mới để thay thế.')) + '</span>' + switchHTML('name="telegram_clear"', false, esc(t('Xóa cấu hình Telegram'))) : '<span class="badge">' + esc(t('Chưa cấu hình')) + '</span>') + '</div></div>' +
             '<div class="field"><label>Bot Token</label><input class="input mono" name="telegram_token" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="' + esc(s.telegram_configured ? t('Đã lưu, để trống nếu không đổi') : '123456789:AA...') + '"></div>' +
             '<div class="field"><label>Chat ID</label><input class="input mono" name="telegram_chat_id" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore placeholder="' + esc(s.telegram_configured ? t('Đã lưu, để trống nếu không đổi') : '-1001234567890') + '"></div>' +
@@ -1267,7 +1276,7 @@
                 return (b.crons.length ? '<div class="picks">' + b.crons.map(function (c) { return '<div class="cron-line">' + esc(c) + '</div>'; }).join('') + '</div>' : '<div class="empty" style="padding:20px">' + esc(t('Bản sao lưu không có cron job nào.')) + '</div>') +
                     '<div class="sel-bar"><span class="grow muted small">' + esc(t('Danh sách cron job hiện tại sẽ được thay bằng danh sách trên.')) + '</span><button class="btn btn-primary" data-act="restore-cron"' + (canR ? '' : ' disabled') + '>' + ic('restore') + esc(t('Khôi phục cron')) + '</button></div>';
             case 'full':
-                return missingDomainsNote(b) + '<div class="danger-box">' +
+                return missingDomainsNote(b) + missingSubsNote(b) + '<div class="danger-box">' +
                     '<div class="cell-main" style="margin-bottom:6px">' + ic('alert') + ' ' + esc(t('Khôi phục toàn bộ tài khoản {user} về {date}', { user: b.username, date: fmtDate(b.created_at) })) + '</div>' +
                     '<ul style="margin:0;padding-left:18px;line-height:1.8"><li>' + esc(t('Toàn bộ file trong thư mục home được ghi đè bằng bản sao lưu (file mới tạo sau thời điểm này vẫn được giữ).')) + '</li><li>' + esc(t('{n} database được import lại.', { n: b.databases.length })) + '</li><li>' + esc(t('{e} hộp thư, {d} DNS zone và cron job được khôi phục.', { e: b.emails.length, d: b.domains.length })) + '</li></ul></div>' +
                     '<div class="sel-bar"><span class="grow muted small">' + esc(t('Nên khôi phục từng phần nếu chỉ cần lấy lại vài file hoặc một database.')) + '</span><button class="btn btn-danger" data-act="restore-full"' + (canR ? '' : ' disabled') + '>' + ic('restore') + esc(t('Khôi phục toàn bộ')) + '</button></div>';
@@ -1283,6 +1292,22 @@
         if (!missing.length) return '';
         return '<div class="banner warn">' + ic('alert', 'i-lg') + '<div><strong>' + esc(t('Tài khoản chưa có {n} tên miền của bản sao lưu', { n: missing.length })) + '</strong>' +
             esc(t('Email và DNS của {domains} sẽ bị bỏ qua. Thêm các tên miền này trong DirectAdmin trước khi khôi phục.', { domains: missing.join(', ') })) + '</div></div>';
+    }
+
+    /** Subdomain/domain pointer có trong bản sao lưu nhưng tài khoản hiện chưa có (plugin không tạo lại). */
+    function missingSubsNote(b) {
+        var acc = null;
+        S.accounts.forEach(function (a) { if (a.username === b.username) acc = a; });
+        if (!acc) return '';
+        var subs = (b.subdomains || []).filter(function (d) { return (acc.subdomains || []).indexOf(d) === -1; });
+        var have = (acc.pointers || []).map(function (x) { return x.name; });
+        var ptrs = (b.pointers || []).filter(function (x) { return have.indexOf(x.name) === -1; }).map(function (x) { return x.name; });
+        if (!subs.length && !ptrs.length) return '';
+        var list = [];
+        if (subs.length) list.push(t('subdomain: {list}', { list: subs.join(', ') }));
+        if (ptrs.length) list.push(t('domain pointer: {list}', { list: ptrs.join(', ') }));
+        return '<div class="banner warn">' + ic('alert', 'i-lg') + '<div><strong>' + esc(t('Tài khoản chưa có một số subdomain / domain pointer của bản sao lưu')) + '</strong>' +
+            esc(t('File vẫn được khôi phục, nhưng các mục này chỉ chạy lại sau khi tạo lại trong DirectAdmin ({list}).', { list: list.join('; ') })) + '</div></div>';
     }
 
     function pickList(items, icon, emptyText, note, canR) {

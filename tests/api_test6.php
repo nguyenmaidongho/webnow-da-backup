@@ -12,7 +12,14 @@ $resetDa = function () {
     $p->setValue(null, []);
 };
 $cafe = ['username' => 'quancafe', 'usertype' => 'user', 'creator' => 'reseller_vn', 'domain' => 'quancafe.vn', 'domains' => ['quancafe.vn', 'cafe-sach.vn'], 'package' => '', 'suspended' => false, 'quota_mb' => 0, 'usage_mb' => 80.0,
-    'databases' => ['quancafe_wp'], 'emails' => ['info@quancafe.vn', 'ban@cafe-sach.vn'], 'crons' => []];
+    'databases' => ['quancafe_wp'], 'emails' => ['info@quancafe.vn', 'ban@cafe-sach.vn'], 'crons' => [],
+    'subdomains' => ['blog.quancafe.vn', 'm.quancafe.vn'], 'pointers' => [['name' => 'quancafe.com', 'target' => 'quancafe.vn', 'alias' => true]]];
+
+// Đọc dòng domain pointer của DirectAdmin
+ok(WNBDirectAdmin::pointerLine('QuanCafe.com=type=alias', 'quancafe.vn') === ['name' => 'quancafe.com', 'target' => 'quancafe.vn', 'alias' => true], 'pointer alias');
+ok(WNBDirectAdmin::pointerLine('cafe.net=type=pointer', 'quancafe.vn')['alias'] === false, 'pointer chuyển hướng');
+ok(WNBDirectAdmin::pointerLine('cu.vn', 'quancafe.vn')['alias'] === true, 'pointer kiểu cũ (không có type) là alias');
+ok(WNBDirectAdmin::pointerLine('bad_name=type=alias', 'quancafe.vn') === null && WNBDirectAdmin::pointerLine('', 'quancafe.vn') === null, 'bỏ qua dòng pointer không hợp lệ');
 WNBDirectAdmin::$demoExtra = ['quancafe' => $cafe];
 $r = call('admin', 'admin', ['action' => 'backup_now', 'username' => 'quancafe', 'destination_id' => 'dest_local', 'csrf' => $ac]);
 ok($r['ok'], 'sao lưu tài khoản sắp xóa: ' . ($r['error'] ?? ''));
@@ -24,6 +31,7 @@ foreach (WNBStorage::read('backups') as $b) {
     }
 }
 ok($old !== null, 'có bản sao lưu của quancafe');
+ok(($old['subdomains'] ?? null) === ['blog.quancafe.vn', 'm.quancafe.vn'] && ($old['pointers'][0]['name'] ?? '') === 'quancafe.com', 'bản sao lưu ghi subdomain và pointer');
 
 // Xóa tài khoản khỏi DirectAdmin
 WNBDirectAdmin::$demoExtra = [];
@@ -34,7 +42,8 @@ ok(count($gone) === 1 && !empty($gone[0]['account_deleted']), 'admin vẫn thấ
 ok(!isset($gone[0]['storage_path']) && !isset($gone[0]['owner_key']), 'không lộ đường dẫn/owner_key');
 $da = $st['deleted_accounts'] ?? [];
 ok(count($da) === 1 && $da[0]['username'] === 'quancafe' && $da[0]['backups_count'] === 1 && $da[0]['last_backup_id'] === $old['id']
-    && $da[0]['domains'] === ['quancafe.vn', 'cafe-sach.vn'] && $da[0]['databases'] === ['quancafe_wp'] && $da[0]['reseller'] === 'reseller_vn', 'state.deleted_accounts đúng: ' . json_encode($da));
+    && $da[0]['domains'] === ['quancafe.vn', 'cafe-sach.vn'] && $da[0]['databases'] === ['quancafe_wp']
+    && $da[0]['subdomains'] === ['blog.quancafe.vn', 'm.quancafe.vn'] && $da[0]['pointers'] === $cafe['pointers'] && $da[0]['reseller'] === 'reseller_vn', 'state.deleted_accounts đúng: ' . json_encode($da));
 ok(!in_array('quancafe', array_column($st['accounts'], 'username'), true), 'tài khoản đã xóa không nằm trong danh sách tài khoản');
 foreach ([['reseller_vn', 'reseller'], ['nhakhoa', 'user']] as [$u, $role]) {
     $s2 = call($u, $role, ['action' => 'state'])['data'];
@@ -63,7 +72,7 @@ WNBStorage::update('backups', function ($l) {
     }
     return $l;
 });
-WNBDirectAdmin::$demoExtra = ['quancafe' => array_merge($cafe, ['domains' => ['quancafe.vn'], 'emails' => ['info@quancafe.vn']])];
+WNBDirectAdmin::$demoExtra = ['quancafe' => array_merge($cafe, ['domains' => ['quancafe.vn'], 'emails' => ['info@quancafe.vn'], 'subdomains' => ['m.quancafe.vn'], 'pointers' => []])];
 $resetDa();
 $st = call('admin', 'admin', ['action' => 'state'])['data'];
 $b0 = array_values(array_filter($st['backups'], fn($b) => $b['id'] === $old['id']))[0] ?? [];
@@ -107,9 +116,9 @@ foreach (WNBStorage::read('queue') as $t) {
         break;
     }
 }
-ok($rt && $rt['status'] === 'completed' && $rt['warnings'] === 1, 'khôi phục hoàn tất với 1 cảnh báo tên miền thiếu: ' . json_encode($rt));
+ok($rt && $rt['status'] === 'completed' && $rt['warnings'] === 3, 'khôi phục hoàn tất với 3 cảnh báo (tên miền, subdomain, pointer thiếu): ' . json_encode($rt));
 $log = WNBStorage::readLog((string)($rt["id"] ?? ""));
-ok(strpos($log, 'cafe-sach.vn') !== false && strpos($log, 'emails = info@quancafe.vn') !== false, 'log ghi tên miền thiếu, chỉ khôi phục email của tên miền có: ' . $log);
+ok(strpos($log, 'cafe-sach.vn') !== false && strpos($log, 'blog.quancafe.vn') !== false && strpos($log, 'm.quancafe.vn') === false && strpos($log, 'quancafe.com') !== false && strpos($log, 'emails = info@quancafe.vn') !== false, 'log ghi tên miền thiếu, chỉ khôi phục email của tên miền có: ' . $log);
 
 // Dọn
 call('admin', 'admin', ['action' => 'job_delete', 'id' => $jq['id'], 'csrf' => $ac]);
@@ -120,3 +129,17 @@ WNBEngine::worker();
 WNBDirectAdmin::$demoExtra = [];
 $resetDa();
 ok(!in_array('quancafe', array_column(WNBStorage::read('backups'), 'username'), true), 'admin xóa được bản của tài khoản');
+
+// Thông báo mang tên máy chủ (phân biệt khi nhiều máy chủ gửi về cùng một nhóm Telegram)
+$host = WNBEngine::hostname();
+call('admin', 'admin', ['action' => 'settings_save', 'local_backup_root' => '/backup/webnowbackup', 'server_name' => "  control3 <VN>\n", 'csrf' => $ac]);
+ok(WNBStorage::settings()['server_name'] === 'control3 <VN>', 'lưu tên máy chủ (bỏ xuống dòng, khoảng trắng): ' . json_encode(WNBStorage::settings()['server_name']));
+$m = WNBEngine::message('Lịch "Hằng đêm": 3/4 thành công, 1 lỗi', "• shop: lỗi & <b>x</b>\n");
+ok($m['subject'] === '[WebNowBackup · control3 <VN> (' . $host . ')] Lịch "Hằng đêm": 3/4 thành công, 1 lỗi', 'tiêu đề email có tên máy chủ: ' . $m['subject']);
+ok(strpos($m['telegram'], '🖥 <b>control3 &lt;VN&gt; (' . $host . ')</b>' . "\n" . '<b>Lịch &quot;Hằng đêm&quot;') === 0, 'Telegram mở đầu bằng tên máy chủ, thoát HTML: ' . $m['telegram']);
+ok(strpos($m['telegram'], 'lỗi &amp; &lt;b&gt;x&lt;/b&gt;') !== false && strpos($m['email'], 'control3 <VN> (' . $host . ')') !== false, 'chi tiết được thoát HTML, email có dòng máy chủ');
+call('admin', 'admin', ['action' => 'settings_save', 'local_backup_root' => '/backup/webnowbackup', 'server_name' => str_repeat('máy', 30), 'csrf' => $ac]);
+ok(WNB::ulen(WNBStorage::settings()['server_name']) === 60, 'tên máy chủ tối đa 60 ký tự');
+call('admin', 'admin', ['action' => 'settings_save', 'local_backup_root' => '/backup/webnowbackup', 'csrf' => $ac]);
+ok(WNBEngine::serverLabel() === $host && strpos(WNBEngine::message('Tin nhắn thử', '')['telegram'], '<b>' . htmlspecialchars($host) . '</b>') !== false, 'không đặt tên thì dùng hostname');
+ok(call('admin', 'admin', ['action' => 'state'])['data']['server_host'] === $host && !isset(call('reseller_vn', 'reseller', ['action' => 'state'])['data']['server_host']), 'state admin có server_host, reseller không');

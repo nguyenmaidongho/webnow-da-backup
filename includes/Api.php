@@ -274,7 +274,7 @@ final class WNBApi
                 if (trim((string)$s['notify_email']) === '' && ($s['telegram_token'] === '' || $s['telegram_chat_id'] === '')) {
                     throw new WNBError('Chưa cấu hình email hoặc Telegram.');
                 }
-                $res = WNBEngine::notify(wnb_t('[WebNowBackup] Tin nhắn thử'), wnb_t('[WebNowBackup] Tin nhắn thử') . "\n" . wnb_t('Thông báo từ WebNowBackup đã hoạt động.'));
+                $res = WNBEngine::notify(wnb_t('Tin nhắn thử'), wnb_t('Thông báo từ WebNowBackup đã hoạt động.'));
                 if (!empty($res['preview'])) {
                     return $done('Preview: không gửi thông báo thật.');
                 }
@@ -342,7 +342,7 @@ final class WNBApi
             if ($gone) {
                 $b['account_deleted'] = true;
                 $d = &$deleted[$b['username']];
-                $d = $d ?? ['username' => $b['username'], 'reseller' => '', 'domain' => '', 'domains' => [], 'databases' => [], 'backups_count' => 0, 'size_mb' => 0.0, 'last_backup_at' => '', 'last_backup_id' => ''];
+                $d = $d ?? ['username' => $b['username'], 'reseller' => '', 'domain' => '', 'domains' => [], 'subdomains' => [], 'pointers' => [], 'databases' => [], 'backups_count' => 0, 'size_mb' => 0.0, 'last_backup_at' => '', 'last_backup_id' => ''];
                 $d['backups_count']++;
                 $d['size_mb'] = round($d['size_mb'] + (float)$b['size_mb'], 1);
                 if ((string)$b['created_at'] > $d['last_backup_at']) {
@@ -352,6 +352,8 @@ final class WNBApi
                     $d['domain'] = (string)($b['domain'] ?? '');
                     $d['domains'] = array_values((array)($b['domains'] ?? []));
                     $d['databases'] = array_values((array)($b['databases'] ?? []));
+                    $d['subdomains'] = array_values((array)($b['subdomains'] ?? []));
+                    $d['pointers'] = array_values((array)($b['pointers'] ?? []));
                 }
                 unset($d);
             } elseif ($role === 'admin' && self::previousOwner($b)) {
@@ -458,6 +460,7 @@ final class WNBApi
             // Bí mật Telegram chỉ được ghi đè, không bao giờ trả về giao diện.
             $state['settings'] = $settings;
             $state['settings']['telegram_configured'] = $settings['telegram_token'] !== '' && $settings['telegram_chat_id'] !== '';
+            $state['server_host'] = WNBEngine::hostname();
             unset($state['settings']['telegram_token'], $state['settings']['telegram_chat_id']);
             $state['health'] = array_map(fn($i) => WNBLang::render($i['msg']), WNBEngine::healthIssues());
             $deleted = array_values($deleted);
@@ -954,6 +957,10 @@ final class WNBApi
             $chat = $newChat;
         }
 
+        // Tên máy chủ trong thông báo: một dòng, tối đa 60 ký tự.
+        $serverName = trim((string)preg_replace('/[\x00-\x1F\x7F]+/u', ' ', (string)($p['server_name'] ?? '')));
+        $serverName = WNB::ulen($serverName) > 60 ? WNB::usub($serverName, 60) : $serverName;
+
         $excludes = implode("\n", array_slice(array_filter(array_map('trim', preg_split('/\r?\n/', (string)($p['excludes'] ?? ''))), fn($l) => $l !== '' && strpos($l, '..') === false), 0, 50));
         WNBStorage::update('settings', fn($s) => array_merge(WNBStorage::defaultSettings(), $s, [
             'local_backup_root' => $root,
@@ -969,6 +976,7 @@ final class WNBApi
             'exclude_resellers' => array_values(array_filter(self::listParam($p, 'exclude_resellers'), [WNBDirectAdmin::class, 'isOwnerAccount'])),
             'language' => ($p['language'] ?? 'vi') === 'en' ? 'en' : 'vi',
             'notify_email' => $email,
+            'server_name' => $serverName,
             'notify_on_failure' => (string)($p['notify_on_failure'] ?? '1') === '1',
             'notify_job_report' => $report,
             'notify_health' => (string)($p['notify_health'] ?? '1') === '1',

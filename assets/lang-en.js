@@ -431,5 +431,16 @@ window.WNB_EN = {
     'Tạo trước khi tài khoản bị xóa rồi tạo lại cùng tên. Chỉ admin thấy bản này.': 'Made before the account was deleted and recreated with the same name. Only admin can see this backup.',
     'Tài khoản cũ': 'Previous account',
     'Tài khoản chưa có {n} tên miền của bản sao lưu': 'The account is missing {n} domains from this backup',
-    'Email và DNS của {domains} sẽ bị bỏ qua. Thêm các tên miền này trong DirectAdmin trước khi khôi phục.': 'Email and DNS for {domains} will be skipped. Add these domains in DirectAdmin before restoring.'
+    'Email và DNS của {domains} sẽ bị bỏ qua. Thêm các tên miền này trong DirectAdmin trước khi khôi phục.': 'Email and DNS for {domains} will be skipped. Add these domains in DirectAdmin before restoring.',
+    'Tạo lại subdomain và domain pointer': 'Recreate subdomains and domain pointers',
+    'Plugin không tạo lại các mục này. File của subdomain vẫn được khôi phục vào đúng thư mục cũ.': 'The plugin does not recreate these. Subdomain files are still restored into their original folders.',
+    'chuyển hướng': 'redirect',
+    'Cấp lại SSL': 'Reissue SSL',
+    'Chứng chỉ SSL không được khôi phục. Bật lại Let\'s Encrypt (hoặc cài lại chứng chỉ) cho các tên miền và subdomain ở trên.': 'SSL certificates are not restored. Enable Let\'s Encrypt again (or reinstall the certificates) for the domains and subdomains above.',
+    'subdomain: {list}': 'subdomains: {list}',
+    'domain pointer: {list}': 'domain pointers: {list}',
+    'Tài khoản chưa có một số subdomain / domain pointer của bản sao lưu': 'The account is missing some subdomains / domain pointers from this backup',
+    'File vẫn được khôi phục, nhưng các mục này chỉ chạy lại sau khi tạo lại trong DirectAdmin ({list}).': 'Files are still restored, but these only work again after you recreate them in DirectAdmin ({list}).',
+    'Tên máy chủ trong thông báo': 'Server name in notifications',
+    'Hiện ở đầu mọi tin Telegram và tiêu đề email để phân biệt khi nhiều máy chủ gửi về cùng một nơi. Để trống thì dùng hostname {host}.': 'Shown at the top of every Telegram message and in email subjects, to tell servers apart when several report to the same place. Leave empty to use the hostname {host}.'
 };

@@ -101,12 +101,15 @@ final class WNBDirectAdmin
                 'usage_mb' => round((float)($usage['quota'] ?? 0), 1),
                 'created_ts' => (int)(strtotime((string)($conf['date_created'] ?? '')) ?: 0),
             ];
+            $acc['subdomains'] = self::subdomains($u, $acc['domains']);
+            $acc['pointers'] = self::pointers($u, $acc['domains']);
             if ($detailed) {
                 $acc['databases'] = self::databases($u);
                 $acc['emails'] = self::emails($acc['domains']);
                 $acc['crons'] = self::crons($u);
             }
         }
+        $acc += ['subdomains' => [], 'pointers' => []];
         if ($acc['domain'] === '' && !empty($acc['domains'])) {
             $acc['domain'] = $acc['domains'][0];
         }
@@ -176,6 +179,56 @@ final class WNBDirectAdmin
         }
         $list = @file(self::USERS_DIR . '/' . $u . '/domains.list', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
         return array_values(array_filter(array_map('trim', $list), [self::class, 'validDomain']));
+    }
+
+    /** Subdomain tạo ở Subdomain Management, dạng đầy đủ sub.domain (domains/<d>.subdomains, mỗi dòng một nhãn). */
+    public static function subdomains(string $u, array $domains): array
+    {
+        if (WNB::isPreview()) {
+            return self::demoAccounts()[$u]['subdomains'] ?? [];
+        }
+        $out = [];
+        foreach ($domains as $d) {
+            foreach (@file(self::USERS_DIR . '/' . $u . '/domains/' . $d . '.subdomains', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $s) {
+                $fqdn = strtolower(trim($s)) . '.' . $d;
+                if (trim($s) !== '' && self::validDomain($fqdn)) {
+                    $out[] = $fqdn;
+                }
+            }
+        }
+        return array_values(array_unique($out));
+    }
+
+    /**
+     * Domain pointer của tài khoản: [{name, target, alias}] từ domains/<d>.pointers.
+     * Dòng dạng "p.com=type=alias|pointer"; bản DA cũ chỉ có "p.com" (alias).
+     */
+    public static function pointers(string $u, array $domains): array
+    {
+        if (WNB::isPreview()) {
+            return self::demoAccounts()[$u]['pointers'] ?? [];
+        }
+        $out = [];
+        foreach ($domains as $d) {
+            foreach (@file(self::USERS_DIR . '/' . $u . '/domains/' . $d . '.pointers', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+                $p = self::pointerLine($line, $d);
+                if ($p) {
+                    $out[$p['name']] = $p;
+                }
+            }
+        }
+        return array_values($out);
+    }
+
+    /** Một dòng của domains/<d>.pointers: "p.com=type=alias|pointer" hoặc "p.com" (bản cũ, alias). */
+    public static function pointerLine(string $line, string $target): ?array
+    {
+        $parts = explode('=', trim($line));
+        $name = strtolower(trim($parts[0]));
+        if ($name === '' || !self::validDomain($name)) {
+            return null;
+        }
+        return ['name' => $name, 'target' => $target, 'alias' => strtolower(trim($parts[2] ?? 'alias')) !== 'pointer'];
     }
 
     /** UID, GID, home lấy từ /etc/passwd (home có thể nằm ở /home2...). */
@@ -344,6 +397,8 @@ final class WNBDirectAdmin
             'shopgiay' => [
                 'username' => 'shopgiay', 'usertype' => 'user', 'creator' => 'reseller_vn',
                 'domain' => 'shopgiaydep.vn', 'domains' => ['shopgiaydep.vn', 'khuyenmai.shopgiaydep.vn'],
+                'subdomains' => ['blog.shopgiaydep.vn', 'm.shopgiaydep.vn'],
+                'pointers' => [['name' => 'shopgiaydep.com', 'target' => 'shopgiaydep.vn', 'alias' => true]],
                 'package' => 'Business_20G', 'suspended' => false, 'quota_mb' => 20480, 'usage_mb' => 3450.8,
                 'databases' => ['shopgiay_wp', 'shopgiay_erp'],
                 'emails' => ['info@shopgiaydep.vn', 'cskh@shopgiaydep.vn', 'ketoan@shopgiaydep.vn'],
