@@ -440,15 +440,21 @@ final class WNBApi
             $state['settings']['telegram_configured'] = $settings['telegram_token'] !== '' && $settings['telegram_chat_id'] !== '';
             unset($state['settings']['telegram_token'], $state['settings']['telegram_chat_id']);
             $state['health'] = array_map(fn($i) => WNBLang::render($i['msg']), WNBEngine::healthIssues());
-            $state['jobs'] = array_map(function ($j) {
-                $j = array_merge(['exclude_users' => [], 'exclude_resellers' => [], 'skip_suspended' => false], $j);
+            $scheduled = []; // tài khoản được ít nhất một lịch đang bật sao lưu
+            $state['jobs'] = array_map(function ($j) use (&$scheduled) {
+                $j = array_merge(['filter_mode' => 'exclude', 'exclude_users' => [], 'exclude_resellers' => [], 'include_users' => [], 'include_resellers' => [], 'skip_suspended' => false], $j);
                 unset($j['target'], $j['users'], $j['resellers']);
                 $next = WNBEngine::nextRun($j);
                 $j['next_run'] = $next ? date('Y-m-d H:i:s', $next) : null;
-                $j['target_count'] = count(WNBEngine::jobTargets($j));
+                $targets = WNBEngine::jobTargets($j);
+                $j['target_count'] = count($targets);
+                if ($j['enabled']) {
+                    $scheduled += array_fill_keys($targets, true);
+                }
                 $j['policy'] = WNBEngine::jobPolicy($j);
                 return $j;
             }, WNBStorage::read('jobs'));
+            $state['scheduled'] = array_keys($scheduled);
             $acl = WNBStorage::read('acl');
             $resellers = ['admin'];
             foreach ($accounts as $a) {
@@ -767,7 +773,7 @@ final class WNBApi
         throw new WNBError('Lịch không tồn tại.');
     }
 
-    /** Dựng bản ghi lịch từ form (dùng chung cho lưu và xem trước số tài khoản). Lịch luôn theo quy tắc loại trừ. */
+    /** Dựng bản ghi lịch từ form (dùng chung cho lưu và xem trước số tài khoản). filter_mode: exclude (tất cả trừ...) hoặc include (chỉ những tài khoản/reseller được chọn). */
     private static function jobFromParams(array $p, ?array $existing): array
     {
         $job = array_merge($existing ?? ['id' => 'job_' . bin2hex(random_bytes(4)), 'created_at' => WNB::now(), 'last_run' => null], [
@@ -777,12 +783,17 @@ final class WNBApi
             'schedule_time' => (string)($p['schedule_time'] ?? '02:00'),
             'schedule_weekday' => max(0, min(6, (int)($p['schedule_weekday'] ?? 0))),
             'interval_hours' => max(1, min(24, (int)($p['interval_hours'] ?? 6))),
-            'exclude_users' => array_values(array_filter(self::listParam($p, 'exclude_users'), [WNBDirectAdmin::class, 'validUsername'])),
-            'exclude_resellers' => array_values(array_filter(self::listParam($p, 'exclude_resellers'), [WNBDirectAdmin::class, 'isOwnerAccount'])),
+            'filter_mode' => (string)($p['filter_mode'] ?? '') === 'include' ? 'include' : 'exclude',
             'skip_suspended' => (string)($p['skip_suspended'] ?? '0') === '1',
             'enabled' => (string)($p['enabled'] ?? '1') === '1',
         ]);
-        unset($job['target'], $job['users'], $job['resellers']); // bỏ chế độ "chọn tài khoản" của bản cũ
+        unset($job['target'], $job['users'], $job['resellers']); // bỏ trường của bản cũ
+        // Chỉ lưu danh sách của chế độ đang dùng; danh sách của chế độ kia để trống.
+        $on = $job['filter_mode'];
+        foreach (['include', 'exclude'] as $mode) {
+            $job[$mode . '_users'] = $mode === $on ? array_values(array_unique(array_filter(self::listParam($p, $mode . '_users'), [WNBDirectAdmin::class, 'validUsername']))) : [];
+            $job[$mode . '_resellers'] = $mode === $on ? array_values(array_unique(array_filter(self::listParam($p, $mode . '_resellers'), [WNBDirectAdmin::class, 'isOwnerAccount']))) : [];
+        }
 
         // Giữ bản theo ngày/tuần/tháng. Gửi kiểu cũ 'retention' = giữ N bản mới nhất.
         $keys = ['keep_last', 'keep_daily', 'keep_weekly', 'keep_monthly'];
@@ -819,6 +830,9 @@ final class WNBApi
         }
         if (!preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $job['schedule_time'])) {
             throw new WNBError('Giờ chạy phải có dạng HH:MM.');
+        }
+        if ($job['filter_mode'] === 'include' && !$job['include_users'] && !$job['include_resellers']) {
+            throw new WNBError('Chọn ít nhất một tài khoản hoặc reseller để sao lưu.');
         }
         if ($job['enabled'] && empty($existing['enabled'])) {
             $job['enabled_at'] = WNB::now();

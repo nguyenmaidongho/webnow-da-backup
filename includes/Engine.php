@@ -1899,28 +1899,38 @@ final class WNBEngine
     }
 
     /**
-     * Danh sách tài khoản của một lịch theo quy tắc loại trừ: MỌI tài khoản (kể cả tài khoản tạo sau này)
-     * trừ tài khoản/reseller bị loại trừ của lịch và danh sách "không bao giờ tự sao lưu" trong cài đặt.
-     * Loại trừ một reseller = loại trừ reseller đó cùng toàn bộ khách của họ, kể cả khách tạo sau này.
-     * Tùy chọn bỏ qua tài khoản đang bị tạm khóa.
+     * Danh sách tài khoản của một lịch, tính lại mỗi lần chạy nên tài khoản tạo sau này cũng được tính:
+     * - filter_mode 'exclude' (mặc định): MỌI tài khoản trừ exclude_users / exclude_resellers của lịch.
+     * - filter_mode 'include': chỉ include_users và các reseller trong include_resellers (cùng khách của họ).
+     * Chọn/loại một reseller = chính reseller đó cùng toàn bộ khách của họ, kể cả khách tạo sau này.
+     * Danh sách "không bao giờ tự sao lưu" trong cài đặt luôn bị bỏ qua. Tùy chọn bỏ qua tài khoản tạm khóa.
      */
     public static function jobTargets(array $job): array
     {
         $settings = WNBStorage::settings();
-        $exclude = array_merge(
-            (array)($job['exclude_users'] ?? []),
-            (array)($settings['exclude_accounts'] ?? []),
-            self::resellerExcludes(array_merge((array)($job['exclude_resellers'] ?? []), (array)($settings['exclude_resellers'] ?? [])))
-        );
-        $list = array_values(array_diff(WNBDirectAdmin::usernames(), $exclude));
+        $never = array_merge((array)($settings['exclude_accounts'] ?? []), self::resellerMembers((array)($settings['exclude_resellers'] ?? [])));
+        $all = WNBDirectAdmin::usernames();
+        if (self::jobMode($job) === 'include') {
+            $pick = array_merge((array)($job['include_users'] ?? []), self::resellerMembers((array)($job['include_resellers'] ?? [])));
+            $list = array_intersect($all, $pick);
+        } else {
+            $list = array_diff($all, (array)($job['exclude_users'] ?? []), self::resellerMembers((array)($job['exclude_resellers'] ?? [])));
+        }
+        $list = array_values(array_diff($list, $never));
         if (!empty($job['skip_suspended'])) {
             $list = array_values(array_filter($list, fn($u) => !(WNBDirectAdmin::account($u)['suspended'] ?? false)));
         }
         return $list;
     }
 
-    /** Tài khoản thuộc các reseller bị loại trừ (gồm chính reseller). */
-    public static function resellerExcludes(array $resellers): array
+    /** Chế độ chọn tài khoản của lịch: 'include' (chỉ những tài khoản được chọn) hoặc 'exclude' (tất cả trừ...). */
+    public static function jobMode(array $job): string
+    {
+        return ($job['filter_mode'] ?? '') === 'include' ? 'include' : 'exclude';
+    }
+
+    /** Tài khoản thuộc các reseller trong danh sách (gồm chính reseller). */
+    public static function resellerMembers(array $resellers): array
     {
         $out = [];
         foreach (array_unique($resellers) as $r) {

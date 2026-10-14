@@ -67,6 +67,7 @@ return [
     'Tên lịch phải từ 1 đến 60 ký tự.' => 'Schedule name must be 1 to 60 characters.',
     'Kiểu lịch không hợp lệ.' => 'Invalid schedule type.',
     'Giờ chạy phải có dạng HH:MM.' => 'Run time must be HH:MM.',
+    'Chọn ít nhất một tài khoản hoặc reseller để sao lưu.' => 'Pick at least one account or reseller to back up.',
     'Giới hạn băng thông có dạng 10M, 500K hoặc để trống.' => 'Bandwidth limit looks like 10M, 500K or leave it empty.',
     'Email nhận cảnh báo không hợp lệ.' => 'Invalid alert email.',
     'Bot Token Telegram không hợp lệ (dạng 123456:ABC...).' => 'Invalid Telegram bot token (format 123456:ABC...).',

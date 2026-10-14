@@ -11,7 +11,11 @@ Dự án C:\laragon\www\vaultbackup là plugin DirectAdmin **WebNowBackup** (id 
 - Đóng gói: `php -n -d phar.readonly=0 build-package.php` → `dist/webnowbackup.tar.gz`, gửi file cho người dùng. Đổi file C thì nhắc chạy lại `sh /usr/local/directadmin/plugins/webnowbackup/scripts/install.sh` bằng root.
 
 ## Quyết định của người dùng
-Lịch sao lưu theo **quy tắc loại trừ**: luôn sao lưu TẤT CẢ tài khoản (kể cả tạo sau này), trừ `exclude_users` của lịch và danh sách chung "Không bao giờ tự sao lưu" (`settings.exclude_accounts`). Không quay lại kiểu tick chọn tài khoản được sao lưu.
+Lịch có 2 chế độ (`filter_mode`, 2.4.0 — người dùng yêu cầu thêm chế độ chọn, giống Account Filter Include/Exclude của JetBackup nhưng đặt ngay trong form lịch):
+- `exclude` (mặc định, lịch cũ không có trường này): sao lưu TẤT CẢ tài khoản (kể cả tạo sau này), trừ `exclude_users` / `exclude_resellers`.
+- `include`: chỉ `include_users` + `include_resellers` (reseller = chính họ + khách, kể cả khách tạo sau). Lưu lịch include rỗng bị từ chối.
+- Chỉ lưu danh sách của chế độ đang dùng (danh sách chế độ kia để []). Danh sách chung "Không bao giờ tự sao lưu" (`settings.exclude_accounts`/`exclude_resellers`) luôn thắng ở cả hai chế độ.
+- State admin có `scheduled` (tài khoản thuộc ít nhất 1 lịch đang bật): tab Tài khoản gắn nhãn "Không có lịch", thẻ "chưa sao lưu 48 giờ" bỏ qua các tài khoản đó. Test: `tests/api_test5.php`; tổng 211/211 trên PHP 7.4 và 8.5.
 
 ## Đã làm: loại trừ theo reseller (giống JetBackup Resellers Filter)
 - Lịch có `exclude_resellers`, Cài đặt có `settings.exclude_resellers` (áp dụng mọi lịch). Giá trị hợp lệ: tài khoản usertype reseller hoặc admin (`WNBDirectAdmin::isOwnerAccount`).

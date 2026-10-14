@@ -453,7 +453,12 @@
         return esc(t('Hằng ngày lúc {time}', { time: j.schedule_time }));
     }
     function targetText(j) {
-        var r = (j.exclude_resellers || []).length, u = j.exclude_users.length;
+        if (j.filter_mode === 'include') {
+            var ir = (j.include_resellers || []).length, iu = (j.include_users || []).length;
+            if (ir && iu) return t('Chỉ {r} reseller và {n} tài khoản', { r: ir, n: iu });
+            return ir ? t('Chỉ {n} reseller (kèm khách)', { n: ir }) : t('Chỉ {n} tài khoản được chọn', { n: iu });
+        }
+        var r = (j.exclude_resellers || []).length, u = (j.exclude_users || []).length;
         if (r && u) return t('Tất cả, trừ {r} reseller và {n} tài khoản', { r: r, n: u });
         if (r) return t('Tất cả, trừ {n} reseller (kèm khách)', { n: r });
         return u ? t('Tất cả, trừ {n} tài khoản', { n: u }) : t('Tất cả tài khoản');
@@ -534,6 +539,15 @@
         ((S.settings && S.settings.exclude_accounts) || []).forEach(function (u) { ex[u] = ex[u] || true; });
         return ex;
     }
+    /** Tài khoản không lịch nào đang bật sao lưu (chỉ tính khi có ít nhất một lịch bật). {username: true} */
+    function unscheduled() {
+        var out = {};
+        if (!S.scheduled || !(S.jobs || []).some(function (j) { return j.enabled; })) return out;
+        var on = {};
+        S.scheduled.forEach(function (u) { on[u] = true; });
+        S.accounts.forEach(function (a) { if (!on[a.username]) out[a.username] = true; });
+        return out;
+    }
     /** Trong ô chọn tài khoản: làm mờ tài khoản đã bị loại trừ theo reseller. covered: {username: reseller} */
     function markCovered(form, name, covered) {
         var box = form.querySelector('[data-picker="' + name + '"]');
@@ -553,8 +567,8 @@
     function viewOverview() {
         var st = S.stats;
         var cutoff = serverNow() - 48 * 3600 * 1000;
-        var excluded = globalExcluded();
-        var stale = S.accounts.filter(function (a) { var d = parseDate(a.last_backup_at); return !excluded[a.username] && (!d || d.getTime() < cutoff); });
+        var excluded = globalExcluded(), noJob = unscheduled();
+        var stale = S.accounts.filter(function (a) { var d = parseDate(a.last_backup_at); return !excluded[a.username] && !noJob[a.username] && (!d || d.getTime() < cutoff); });
         var html = healthBanner() + '<div class="grid grid-4" style="margin-bottom:16px">' +
             statCard('users', '', t('Tài khoản'), st.accounts, esc(stale.length ? t('{n} chưa sao lưu trong 48 giờ', { n: stale.length }) : t('Tất cả đã được sao lưu'))) +
             statCard('archive', 'ok', t('Bản sao lưu'), st.backups, esc(t('{size} trên các kho', { size: fmtMb(st.size_mb) }))) +
@@ -613,6 +627,7 @@
         var q = ui.search.trim().toLowerCase();
         var list = S.accounts.filter(function (a) { return !q || a.username.toLowerCase().indexOf(q) !== -1 || (a.domain || '').toLowerCase().indexOf(q) !== -1; });
         var excluded = ROLE === 'admin' ? globalExcluded() : {};
+        var noJob = ROLE === 'admin' ? unscheduled() : {};
         var destSel = '';
         if (perm('can_backup') && S.destinations.length > 1) {
             destSel = '<label class="row small muted">' + esc(t('Lưu vào')) + ' <select class="select" style="width:auto" data-bind="backupDest">' + S.destinations.map(function (d) {
@@ -623,7 +638,7 @@
             var last = a.last_backup_at
                 ? '<div>' + esc(fmtRel(a.last_backup_at)) + '</div><div class="cell-sub">' + esc(t('{n} bản', { n: a.backups_count })) + '</div>'
                 : '<span class="badge warn">' + esc(t('Chưa có')) + '</span>';
-            return '<tr><td><div class="cell-main">' + esc(a.username) + (a.suspended ? ' <span class="badge bad">' + esc(t('Tạm khóa')) + '</span>' : '') + (excluded[a.username] ? ' <span class="badge" title="' + esc(t('Không bao giờ tự sao lưu')) + '">' + esc(t('Loại trừ')) + '</span>' : '') + '</div><div class="cell-sub">' + esc(a.domain || '—') + '</div></td>' +
+            return '<tr><td><div class="cell-main">' + esc(a.username) + (a.suspended ? ' <span class="badge bad">' + esc(t('Tạm khóa')) + '</span>' : '') + (excluded[a.username] ? ' <span class="badge" title="' + esc(t('Không bao giờ tự sao lưu')) + '">' + esc(t('Loại trừ')) + '</span>' : noJob[a.username] ? ' <span class="badge" title="' + esc(t('Không lịch nào đang bật sao lưu tài khoản này')) + '">' + esc(t('Không có lịch')) + '</span>' : '') + '</div><div class="cell-sub">' + esc(a.domain || '—') + '</div></td>' +
                 '<td class="hide-sm">' + userTypeBadge(a.usertype) + (ROLE === 'admin' && a.usertype === 'user' ? '<div class="cell-sub">' + esc(t('của {owner}', { owner: a.creator })) + '</div>' : '') + '</td>' +
                 '<td class="num hide-sm">' + fmtMb(a.usage_mb) + '</td><td>' + last + '</td><td class="actions">' +
                 (perm('can_backup') ? '<button class="btn btn-sm" data-act="backup-now" data-user="' + esc(a.username) + '">' + ic('archive') + esc(t('Sao lưu')) + '</button>' : '') +
@@ -712,10 +727,13 @@
     }
 
     function jobForm(job) {
-        var j = job || { name: '', destination_id: 'dest_local', schedule_type: 'daily', schedule_time: '02:00', schedule_weekday: 0, interval_hours: 6, keep_last: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 3, exclude_users: [], exclude_resellers: [], skip_suspended: false, enabled: true };
+        var j = job || { name: '', destination_id: 'dest_local', schedule_type: 'daily', schedule_time: '02:00', schedule_weekday: 0, interval_hours: 6, keep_last: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 3, filter_mode: 'exclude', exclude_users: [], exclude_resellers: [], include_users: [], include_resellers: [], skip_suspended: false, enabled: true };
         var globalEx = S.settings.exclude_accounts || [];
         var globalRs = S.settings.exclude_resellers || [];
         var globalCovered = resellerExcludeMap(globalRs);
+        var mode = j.filter_mode === 'include' ? 'include' : 'exclude';
+        var rsItems = resellerItems().filter(function (it) { return globalRs.indexOf(it.value) === -1; });
+        var accItems = accountItems().filter(function (it) { return globalEx.indexOf(it.value) === -1 && !globalCovered[it.value]; });
         var body = '<form class="form-grid" data-form="job" autocomplete="off">' +
             (job ? '<input type="hidden" name="id" value="' + esc(j.id) + '">' : '') +
             '<div class="field full"><label>' + esc(t('Tên lịch')) + '</label><input class="input" name="name" maxlength="60" required value="' + esc(nameOf(j.name)) + '" placeholder="' + esc(t('Ví dụ: Hằng đêm lên Cloudflare R2')) + '"></div>' +
@@ -730,14 +748,24 @@
             '<div class="field" data-show="daily weekly"><label>' + esc(t('Giờ chạy')) + '</label><div class="row"><select class="select" name="hh">' + range(0, 23).map(function (h) { return '<option' + (+j.schedule_time.split(':')[0] === h ? ' selected' : '') + '>' + pad(h) + '</option>'; }).join('') + '</select><b>:</b><select class="select" name="mm">' + [0, 5, 10, 15, 20, 30, 40, 45, 50].map(function (m) { return '<option' + (+j.schedule_time.split(':')[1] === m ? ' selected' : '') + '>' + pad(m) + '</option>'; }).join('') + '</select></div></div>' +
             '<div class="field" data-show="weekly"><label>' + esc(t('Ngày trong tuần')) + '</label><select class="select" name="schedule_weekday">' + weekdays().map(function (w, i) { return '<option value="' + i + '"' + (+j.schedule_weekday === i ? ' selected' : '') + '>' + esc(w) + '</option>'; }).join('') + '</select></div>' +
             '<div class="field" data-show="hourly"><label>' + esc(t('Chạy mỗi')) + '</label><select class="select" name="interval_hours">' + [1, 2, 3, 4, 6, 8, 12].map(function (h) { return '<option value="' + h + '"' + (+j.interval_hours === h ? ' selected' : '') + '>' + esc(t('{n} giờ', { n: h })) + '</option>'; }).join('') + '</select></div>' +
-            '<div class="field full"><label>' + esc(t('Loại trừ theo reseller')) + '</label>' +
+            '<div class="field full"><label>' + esc(t('Tài khoản được sao lưu')) + '</label><div class="mode-grid">' +
+            [['exclude', t('Tất cả, trừ một số'), t('Sao lưu mọi tài khoản, kể cả tài khoản tạo sau này. Chỉ chọn những tài khoản KHÔNG cần sao lưu.')],
+                ['include', t('Chỉ tài khoản được chọn'), t('Chỉ sao lưu tài khoản hoặc reseller bạn chọn. Chọn reseller thì khách tạo sau của họ cũng được sao lưu.')]].map(function (o) {
+                    return '<label class="mode-card"><input type="radio" name="filter_mode" value="' + o[0] + '"' + (mode === o[0] ? ' checked' : '') + '><span class="grow"><span class="mode-title">' + esc(o[1]) + '</span><span class="mode-sub">' + esc(o[2]) + '</span></span></label>';
+                }).join('') + '</div></div>' +
+            '<div class="field full" data-mode="exclude"><label>' + esc(t('Loại trừ theo reseller')) + '</label>' +
             '<div class="hint" style="margin:0 0 8px">' + esc(t('Loại trừ một reseller thì cả tài khoản reseller lẫn toàn bộ khách của reseller đó, kể cả khách tạo sau này, đều không được sao lưu. Chọn admin để loại trừ admin và khách do Admin tạo.')) + '</div>' +
-            pickerHTML('exclude_resellers', resellerItems().filter(function (it) { return globalRs.indexOf(it.value) === -1; }), j.exclude_resellers || [], t('Không có reseller.'), 'Đã loại trừ {n}', t('Tìm reseller')) +
-            (globalRs.length ? '<div class="hint">' + esc(t('Ngoài ra luôn bỏ qua {n} reseller trong "Không bao giờ tự sao lưu" (Cài đặt): {list}', { n: globalRs.length, list: globalRs.join(', ') })) + '</div>' : '') + '</div>' +
-            '<div class="field full"><label>' + esc(t('Loại trừ tài khoản')) + '</label>' +
-            '<div class="hint" style="margin:0 0 8px">' + esc(t('Lịch sao lưu tất cả tài khoản, kể cả tài khoản tạo sau này. Chỉ tick những tài khoản KHÔNG cần sao lưu (vd tài khoản dev, test).')) + '</div>' +
-            pickerHTML('exclude_users', accountItems().filter(function (it) { return globalEx.indexOf(it.value) === -1 && !globalCovered[it.value]; }), j.exclude_users, t('Không có tài khoản.'), 'Đã loại trừ {n}') +
-            (globalEx.length ? '<div class="hint">' + esc(t('Ngoài ra luôn bỏ qua {n} tài khoản trong "Không bao giờ tự sao lưu" (Cài đặt): {list}', { n: globalEx.length, list: globalEx.join(', ') })) + '</div>' : '') + '</div>' +
+            pickerHTML('exclude_resellers', rsItems, j.exclude_resellers || [], t('Không có reseller.'), 'Đã loại trừ {n}', t('Tìm reseller')) + '</div>' +
+            '<div class="field full" data-mode="exclude"><label>' + esc(t('Loại trừ tài khoản')) + '</label>' +
+            '<div class="hint" style="margin:0 0 8px">' + esc(t('Tick những tài khoản KHÔNG cần sao lưu (vd tài khoản dev, test).')) + '</div>' +
+            pickerHTML('exclude_users', accItems, j.exclude_users || [], t('Không có tài khoản.'), 'Đã loại trừ {n}') + '</div>' +
+            '<div class="field full" data-mode="include"><label>' + esc(t('Sao lưu theo reseller')) + '</label>' +
+            '<div class="hint" style="margin:0 0 8px">' + esc(t('Chọn một reseller thì sao lưu cả tài khoản reseller lẫn toàn bộ khách của reseller đó, kể cả khách tạo sau này. Chọn admin để gồm admin và khách do Admin tạo.')) + '</div>' +
+            pickerHTML('include_resellers', rsItems, j.include_resellers || [], t('Không có reseller.'), 'Đã chọn {n}', t('Tìm reseller')) + '</div>' +
+            '<div class="field full" data-mode="include"><label>' + esc(t('Sao lưu tài khoản')) + '</label>' +
+            '<div class="hint" style="margin:0 0 8px">' + esc(t('Tick những tài khoản cần sao lưu. Tài khoản tạo sau này không tự được thêm, trừ khi thuộc reseller đã chọn ở trên.')) + '</div>' +
+            pickerHTML('include_users', accItems, j.include_users || [], t('Không có tài khoản.'), 'Đã chọn {n}') + '</div>' +
+            (globalRs.length || globalEx.length ? '<div class="field full"><div class="hint" style="margin:0">' + ic('info') + ' ' + esc(t('Luôn bỏ qua mục trong "Không bao giờ tự sao lưu" (Cài đặt): {list}', { list: globalRs.map(function (r) { return t('{r} (kèm khách)', { r: r }); }).concat(globalEx).join(', ') })) + '</div></div>' : '') +
             '<div class="field full">' + switchHTML('name="skip_suspended"', j.skip_suspended, esc(t('Bỏ qua tài khoản đang bị tạm khóa'))) + '</div>' +
             '<div class="field full">' + switchHTML('name="enabled"', j.enabled, esc(t('Bật lịch này'))) + '</div>' +
             '</form><div class="sel-bar" data-job-preview><span class="grow muted">…</span></div>';
@@ -747,15 +775,18 @@
             var data = formData(form);
             data.schedule_time = data.hh + ':' + data.mm;
             delete data.hh; delete data.mm;
-            data.exclude_resellers = pickerValues(form, 'exclude_resellers');
-            var covered = resellerExcludeMap(data.exclude_resellers);
-            // Tài khoản đã thuộc reseller bị loại trừ thì không cần lưu riêng
-            data.exclude_users = pickerValues(form, 'exclude_users').filter(function (u) { return !covered[u]; });
+            // Chỉ gửi danh sách của chế độ đang chọn
+            var md = data.filter_mode === 'include' ? 'include' : 'exclude';
+            data[md + '_resellers'] = pickerValues(form, md + '_resellers');
+            var covered = resellerExcludeMap(data[md + '_resellers']);
+            // Tài khoản đã thuộc reseller được chọn thì không cần lưu riêng
+            data[md + '_users'] = pickerValues(form, md + '_users').filter(function (u) { return !covered[u]; });
             return data;
         };
         var previewTimer = null;
         var preview = function () {
             markCovered(form, 'exclude_users', resellerExcludeMap(pickerValues(form, 'exclude_resellers')));
+            markCovered(form, 'include_users', resellerExcludeMap(pickerValues(form, 'include_resellers')));
             clearTimeout(previewTimer);
             previewTimer = setTimeout(function () {
                 var box = m.el.querySelector('[data-job-preview] .grow');
@@ -777,6 +808,9 @@
             keepHint();
             var st = form.schedule_type.value;
             form.querySelectorAll('[data-show]').forEach(function (el) { el.hidden = el.getAttribute('data-show').split(' ').indexOf(st) === -1; });
+            var md = form.querySelector('[name=filter_mode]:checked').value;
+            form.querySelectorAll('[data-mode]').forEach(function (el) { el.hidden = el.getAttribute('data-mode') !== md; });
+            form.querySelectorAll('.mode-card').forEach(function (el) { el.classList.toggle('active', el.querySelector('input').checked); });
             preview();
         };
         form.addEventListener('change', sync);
