@@ -149,6 +149,12 @@ final class WNBEngine
                 case 'delete':
                     $res = self::deleteBackupTask($task);
                     break;
+                case 'maintain':
+                    $res = self::maintainRepo($task);
+                    break;
+                case 'rescan':
+                    $res = self::rescanRepo($task);
+                    break;
                 default:
                     throw new WNBError('Loại tác vụ không hợp lệ.');
             }
@@ -357,6 +363,9 @@ final class WNBEngine
         if (!$isLocal && !WNBRclone::installed()) {
             throw new WNBError('Chưa cài rclone nên không sao lưu lên cloud được.');
         }
+        if (!$isLocal && WNBRclone::destFormat($dest) === 'restic') {
+            return self::backupRestic($task, $acc, $dest, $id, $isSnap);
+        }
         // Chế độ "Nén": home và database được nén rồi đẩy thẳng lên cloud theo luồng,
         // local chỉ giữ vài file cấu hình nhỏ -> vẫn sao lưu được khi ổ đĩa máy chủ gần đầy.
         $archive = !$isLocal && WNBRclone::destFormat($dest) === 'archive';
@@ -385,25 +394,9 @@ final class WNBEngine
         $homeArchived = false;
 
         try {
-            // 1. Cấu hình DirectAdmin của user (user.conf, domains, crontab.conf...)
+            // 1-2. Cấu hình DirectAdmin, cron, DNS zone, cấu hình email
             self::step($task, 5, 'Sao lưu cấu hình DirectAdmin');
-            if (WNBShell::run(sprintf('cp -a %s %s', escapeshellarg(WNBDirectAdmin::USERS_DIR . '/' . $u . '/.'), escapeshellarg($work . '/config/')), $out) !== 0) {
-                $warnings[] = WNBLang::msg('Không sao chép đủ cấu hình DirectAdmin: {detail}', ['detail' => WNBShell::tail($out, 2)]);
-            }
-            $sysCron = WNBDirectAdmin::systemCrontab($u);
-            if ($sysCron !== '') {
-                @copy($sysCron, $work . '/cron/system.cron');
-            }
-
-            // 2. DNS zone
-            foreach ($acc['domains'] as $d) {
-                $zone = WNBDirectAdmin::zoneFile($d);
-                if (is_file($zone)) {
-                    @copy($zone, $work . '/dns/' . $d . '.db');
-                } else {
-                    $warnings[] = WNBLang::msg('Không thấy DNS zone của {domain}.', ['domain' => $d]);
-                }
-            }
+            self::collectMeta($u, $acc, $work, $warnings);
 
             // 3. Database
             $dumped = [];
@@ -448,16 +441,6 @@ final class WNBEngine
                 } finally {
                     if (isset($cnf)) {
                         @unlink($cnf);
-                    }
-                }
-            }
-
-            // 4. Cấu hình email (/etc/virtual/<domain>: passwd, quota, aliases...)
-            foreach ($acc['domains'] as $d) {
-                if (is_dir('/etc/virtual/' . $d)) {
-                    self::mkdirSecure($work . '/emails/' . $d, 0700);
-                    if (WNBShell::run(sprintf('cp -a %s %s', escapeshellarg('/etc/virtual/' . $d . '/.'), escapeshellarg($work . '/emails/' . $d . '/')), $out) !== 0) {
-                        $warnings[] = WNBLang::msg('Không sao chép đủ cấu hình email {domain}.', ['domain' => $d]);
                     }
                 }
             }
@@ -563,6 +546,225 @@ final class WNBEngine
         return ['message' => WNBLang::msg($key, $vars), 'warnings' => $warnings];
     }
 
+    /** Thẻ restic của một bản sao lưu (để nhận lại bản khi quét kho). */
+    private static function resticTags(string $u, string $id, bool $isSnap, string $jobId): string
+    {
+        $tags = ['wnb', 'u:' . $u, 'b:' . $id, 't:' . ($isSnap ? 'snapshot' : 'backup')];
+        if ($jobId !== '') {
+            $tags[] = 'j:' . $jobId;
+        }
+        return implode('', array_map(fn($t) => ' --tag ' . escapeshellarg($t), $tags));
+    }
+
+    /**
+     * Sao lưu incremental bằng restic: chỉ phần dữ liệu mới được tải lên, trùng lặp giữa các lần và giữa các tài khoản
+     * chỉ lưu một lần. Home + cấu hình là một snapshot (thư mục cấu hình có đường dẫn cố định để restic nhận ra bản trước),
+     * mỗi database là một snapshot riêng (mysqldump chạy thẳng vào restic, không ghi ra đĩa).
+     */
+    private static function backupRestic(array $task, array $acc, array $dest, string $id, bool $isSnap): array
+    {
+        if (!WNBRestic::usable()) {
+            throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
+        }
+        if (!WNBRestic::hasKey($dest['id'])) {
+            throw new WNBError('Chưa có mật khẩu kho restic. Hãy mở kho trong mục Kho lưu trữ và lưu lại.');
+        }
+        $u = $acc['username'];
+        $staging = self::stagingRoot();
+        $free = @disk_free_space($staging);
+        if ($free !== false && $free / 1073741824 < self::RESTIC_MIN_FREE_GB) {
+            throw new WNBError('Kho chỉ còn {free} GB trống (tối thiểu {min} GB). Hãy dọn bớt hoặc giảm số bản giữ lại.', ['free' => round($free / 1073741824, 2), 'min' => self::RESTIC_MIN_FREE_GB]);
+        }
+        $inodes = self::freeInodes($staging);
+        if ($inodes !== null && $inodes < self::ARCHIVE_MIN_FREE_INODES) {
+            throw new WNBError('Ổ đĩa chứa {path} gần hết inode (chỉ còn {n} inode trống) nên không tạo thêm file được. Hãy xóa bớt file nhỏ (bản sao lưu cũ, session, mail queue) hoặc chuyển thư mục lưu trữ sang ổ khác.', ['path' => $staging, 'n' => $inodes]);
+        }
+        WNBRestic::ensureRepo($dest);
+
+        self::mkdirSecure($staging . '/rmeta', 0700);
+        $work = $staging . '/rmeta/' . $u;
+        self::rmrf($work);
+        foreach (['', '/config', '/emails', '/dns', '/cron'] as $sub) {
+            self::mkdirSecure($work . $sub, 0700);
+        }
+        $warnings = [];
+        $prefix = WNBShell::lowPriorityPrefix();
+        $host = self::hostname();
+        $tags = self::resticTags($u, $id, $isSnap, (string)$task['job_id']);
+        $snaps = ['home' => '', 'dbs' => []];
+        $bytes = 0;
+        $added = 0;
+        $dumped = [];
+        $parent = null;
+        try {
+            self::step($task, 5, 'Sao lưu cấu hình DirectAdmin');
+            self::collectMeta($u, $acc, $work, $warnings);
+
+            if (!empty($acc['databases'])) {
+                self::step($task, 15, 'Dump {n} database', ['n' => count($acc['databases'])]);
+                $mysqldump = WNBShell::which('mysqldump') ?: 'mysqldump';
+                try {
+                    $cnf = WNBDirectAdmin::mysqlDefaultsFile();
+                    foreach ($acc['databases'] as $db) {
+                        $code = WNBShell::run($prefix . WNBRestic::cmd($dest, 'backup --json --retry-lock 30m --host ' . escapeshellarg($host) . $tags
+                            . ' --tag ' . escapeshellarg('db:' . $db) . ' --stdin-from-command --stdin-filename ' . escapeshellarg($db . '.sql') . ' -- '
+                            . escapeshellarg($mysqldump) . ' --defaults-extra-file=' . escapeshellarg($cnf) . ' --single-transaction --quick --routines --triggers --events --max-allowed-packet=1G ' . escapeshellarg($db), true), $out);
+                        $r = WNBRestic::parseJson($out);
+                        $snap = (string)($r['summary']['snapshot_id'] ?? '');
+                        if ($code === 0 && $snap !== '') {
+                            $snaps['dbs'][$db] = $snap;
+                            $dumped[] = $db;
+                            $bytes += (int)($r['summary']['total_bytes_processed'] ?? 0);
+                            $added += (int)($r['summary']['data_added_packed'] ?? $r['summary']['data_added'] ?? 0);
+                        } else {
+                            if ($snap !== '') {
+                                WNBRestic::forget($dest, [$snap]);
+                            }
+                            $warnings[] = WNBLang::msg('Dump database {db} thất bại: {detail}', ['db' => $db, 'detail' => self::resticDetail($r, $out)]);
+                        }
+                    }
+                } catch (Throwable $e) {
+                    $warnings[] = WNBLang::msg('Bỏ qua database: {detail}', ['detail' => $e->getMessage()]);
+                } finally {
+                    if (isset($cnf)) {
+                        @unlink($cnf);
+                    }
+                }
+            }
+
+            $pw = WNBDirectAdmin::passwd($u);
+            $home = $pw['home'] ?? '';
+            if ($home === '' || !is_dir($home)) {
+                $warnings[] = WNBLang::msg('Không tìm thấy thư mục home.');
+                $home = '';
+            }
+            foreach (WNBStorage::read('backups') as $b) {
+                if ($b['username'] === $u && $b['destination_id'] === $dest['id'] && ($b['format'] ?? '') === 'restic' && !empty($b['restic']['home']) && ($b['restic']['home_path'] ?? '') === $home) {
+                    $parent = (string)$b['restic']['home'];
+                    break;
+                }
+            }
+            // Manifest đi kèm snapshot để "Quét lại kho" dựng lại được danh sách khi mất dữ liệu plugin.
+            file_put_contents($work . '/manifest.json', json_encode([
+                'id' => $id, 'username' => $u, 'reseller' => $acc['creator'], 'domain' => $acc['domain'], 'domains' => $acc['domains'],
+                'type' => $isSnap ? 'snapshot' : 'backup', 'databases' => $dumped, 'emails' => $acc['emails'], 'crons' => $acc['crons'],
+                'job_id' => $task['job_id'], 'note' => $task['note'], 'created_at' => WNB::now(), 'host' => $host,
+            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+
+            self::step($task, 35, 'Sao lưu thư mục home lên {dest} (chỉ phần thay đổi)', ['dest' => $dest['name']]);
+            $excludes = '';
+            if ($home !== '') {
+                foreach (preg_split('/
+?
+/', (string)WNBStorage::settings()['excludes']) as $pattern) {
+                    $pattern = trim($pattern);
+                    if ($pattern !== '' && strpos($pattern, '..') === false) {
+                        $excludes .= ' --exclude=' . escapeshellarg($home . '/' . ltrim($pattern, '/'));
+                    }
+                }
+            }
+            $code = WNBShell::run($prefix . WNBRestic::cmd($dest, 'backup --json --retry-lock 30m --host ' . escapeshellarg($host) . $tags
+                . ' --tag part:home --tag ' . escapeshellarg('hp:' . $home) . ' --tag ' . escapeshellarg('mp:' . $work)
+                . ($parent ? ' --parent ' . escapeshellarg($parent) : '') . $excludes
+                . ($home !== '' ? ' ' . escapeshellarg($home) : '') . ' ' . escapeshellarg($work), true), $out);
+            $r = WNBRestic::parseJson($out);
+            $snap = (string)($r['summary']['snapshot_id'] ?? '');
+            if ($snap === '' || ($code !== 0 && $code !== 3)) {
+                if (self::outOfSpace($out)) {
+                    throw self::diskFullError($staging);
+                }
+                throw new WNBError('restic sao lưu thất bại (mã {code}): {detail}', ['code' => $code, 'detail' => self::resticDetail($r, $out)]);
+            }
+            if ($code === 3) {
+                $warnings[] = WNBLang::msg('Một số file không đọc được hoặc thay đổi trong lúc sao lưu: {detail}', ['detail' => self::resticDetail($r, $out)]);
+            }
+            $snaps['home'] = $snap;
+            $bytes += (int)($r['summary']['total_bytes_processed'] ?? 0);
+            $added += (int)($r['summary']['data_added_packed'] ?? $r['summary']['data_added'] ?? 0);
+        } catch (Throwable $e) {
+            try {
+                WNBRestic::forget($dest, array_values(array_filter(array_merge([$snaps['home']], array_values($snaps['dbs'])))));
+            } catch (Throwable $ignored) {
+            }
+            self::rmrf($work);
+            throw $e;
+        }
+        self::rmrf($work);
+
+        $record = [
+            'id' => $id,
+            'username' => $u,
+            'reseller' => $acc['creator'],
+            'owner_key' => WNBDirectAdmin::ownerKey($u),
+            'domain' => $acc['domain'],
+            'domains' => $acc['domains'],
+            'type' => $isSnap ? 'snapshot' : 'backup',
+            'destination_id' => $dest['id'],
+            'destination_name' => $dest['name'],
+            'destination_type' => $dest['type'],
+            'format' => 'restic',
+            'home_archive' => $home !== '',
+            'job_id' => $task['job_id'],
+            'note' => $task['note'],
+            'databases' => $dumped,
+            'emails' => $acc['emails'],
+            'crons' => $acc['crons'],
+            'incremental' => (bool)$parent,
+            'size_mb' => round($bytes / 1048576, 1),
+            'new_mb' => round($added / 1048576, 1),
+            'warnings' => $warnings,
+            'created_at' => WNB::now(),
+            'storage_path' => WNBRestic::repo($dest),
+            'restic' => ['home' => $snaps['home'], 'dbs' => $snaps['dbs'], 'home_path' => $home, 'meta_path' => $work, 'host' => $host],
+        ];
+        WNBStorage::update('backups', function ($list) use ($record) {
+            array_unshift($list, $record);
+            return $list;
+        });
+        $removed = self::applyRetention($record);
+        $vars = ['user' => $u, 'size' => $record['size_mb'], 'new' => $record['new_mb'], 'removed' => $removed];
+        if ($isSnap) {
+            $key = $removed ? 'Đã tạo snapshot {user} ({size} MB), xóa {removed} bản cũ' : 'Đã tạo snapshot {user} ({size} MB)';
+        } else {
+            $key = $removed ? 'Đã sao lưu {user} ({size} MB, mới {new} MB), xóa {removed} bản cũ' : 'Đã sao lưu {user} ({size} MB, mới {new} MB)';
+        }
+        return ['message' => WNBLang::msg($key, $vars), 'warnings' => $warnings];
+    }
+
+    private static function resticDetail(array $parsed, array $out): string
+    {
+        $errors = array_values(array_filter($parsed['errors']));
+        return $errors ? implode(' | ', array_slice($errors, -3)) : WNBShell::tail($out, 3);
+    }
+
+    /** Cấu hình DirectAdmin (user.conf, domains, crontab.conf...), crontab hệ thống, DNS zone, cấu hình email /etc/virtual. */
+    private static function collectMeta(string $u, array $acc, string $work, array &$warnings): void
+    {
+        if (WNBShell::run(sprintf('cp -a %s %s', escapeshellarg(WNBDirectAdmin::USERS_DIR . '/' . $u . '/.'), escapeshellarg($work . '/config/')), $out) !== 0) {
+            $warnings[] = WNBLang::msg('Không sao chép đủ cấu hình DirectAdmin: {detail}', ['detail' => WNBShell::tail($out, 2)]);
+        }
+        $sysCron = WNBDirectAdmin::systemCrontab($u);
+        if ($sysCron !== '') {
+            @copy($sysCron, $work . '/cron/system.cron');
+        }
+        foreach ($acc['domains'] as $d) {
+            $zone = WNBDirectAdmin::zoneFile($d);
+            if (is_file($zone)) {
+                @copy($zone, $work . '/dns/' . $d . '.db');
+            } else {
+                $warnings[] = WNBLang::msg('Không thấy DNS zone của {domain}.', ['domain' => $d]);
+            }
+        }
+        foreach ($acc['domains'] as $d) {
+            if (is_dir('/etc/virtual/' . $d)) {
+                self::mkdirSecure($work . '/emails/' . $d, 0700);
+                if (WNBShell::run(sprintf('cp -a %s %s', escapeshellarg('/etc/virtual/' . $d . '/.'), escapeshellarg($work . '/emails/' . $d . '/')), $out) !== 0) {
+                    $warnings[] = WNBLang::msg('Không sao chép đủ cấu hình email {domain}.', ['domain' => $d]);
+                }
+            }
+        }
+    }
+
     private const DISK_FULL = 'Ổ đĩa chứa {path} đã đầy (còn {free} GB và {inodes} inode trống). Hãy dọn bớt, giảm số bản giữ lại hoặc chuyển thư mục lưu trữ sang ổ lớn hơn trong Cài đặt.';
     /** Dưới mức này thì không bắt đầu sao lưu (mỗi tài khoản có thể cần hàng chục nghìn file). */
     private const MIN_FREE_INODES = 50000;
@@ -570,6 +772,8 @@ final class WNBEngine
     /** Chế độ Nén chỉ ghi vài file cấu hình ra đĩa local nên chỉ cần rất ít chỗ trống. */
     private const ARCHIVE_MIN_FREE_GB = 0.2;
     private const ARCHIVE_MIN_FREE_INODES = 2000;
+    /** restic cần thêm chỗ cho bộ đệm chỉ mục và file pack tạm. */
+    private const RESTIC_MIN_FREE_GB = 0.5;
     /** Tải lên theo luồng: chunk 32M cho phép file tới ~320 GB trên S3 (10.000 phần), tốn ~128 MB RAM. */
     private const STREAM_FLAGS = ' --s3-chunk-size 32M --retries 1 --low-level-retries 10';
 
@@ -758,26 +962,11 @@ final class WNBEngine
      */
     private static function applyRetention(array $rec): int
     {
-        $settings = WNBStorage::settings();
-        if ($rec['type'] === 'snapshot') {
-            $keep = (int)$settings['max_snapshots_per_user'];
-        } elseif ($rec['job_id'] !== '') {
-            $keep = (int)$settings['default_retention'];
-            foreach (WNBStorage::read('jobs') as $j) {
-                if ($j['id'] === $rec['job_id']) {
-                    $keep = (int)$j['retention'];
-                }
-            }
-        } else {
-            $keep = (int)$settings['default_retention'];
-        }
-        $keep = max(1, $keep);
-
-        $matching = array_values(array_filter(WNBStorage::read('backups'), function ($b) use ($rec) {
-            return $b['username'] === $rec['username'] && $b['destination_id'] === $rec['destination_id']
-                && $b['type'] === $rec['type'] && ($rec['type'] === 'snapshot' || ($b['job_id'] ?? '') === $rec['job_id']);
-        }));
-        $remove = array_values(array_filter(array_slice($matching, $keep), fn($b) => !self::backupBusy($b['id'])));
+        $policy = self::groupPolicy($rec, WNBStorage::read('jobs'));
+        $matching = array_values(array_filter(WNBStorage::read('backups'), fn($b) => self::groupKey($b) === self::groupKey($rec)));
+        usort($matching, fn($a, $b) => strcmp((string)$b['created_at'], (string)$a['created_at']));
+        $keep = self::retentionKeep($matching, $policy);
+        $remove = array_values(array_filter($matching, fn($b) => !isset($keep[$b['id']]) && !self::backupBusy($b['id'])));
         foreach ($remove as $b) {
             self::removeStorage($b);
         }
@@ -786,6 +975,96 @@ final class WNBEngine
             WNBStorage::update('backups', fn($list) => array_values(array_filter($list, fn($b) => !in_array($b['id'], $ids, true))));
         }
         return count($ids);
+    }
+
+    /** Nhóm giữ bản: cùng tài khoản + kho + loại, và cùng lịch (snapshot gom chung). */
+    private static function groupKey(array $b): string
+    {
+        $type = (string)($b['type'] ?? 'backup');
+        return ($b['username'] ?? '') . '|' . ($b['destination_id'] ?? '') . '|' . $type . '|' . ($type === 'snapshot' ? '' : (string)($b['job_id'] ?? ''));
+    }
+
+    /**
+     * Chính sách giữ bản của lịch: last (N bản mới nhất), daily/weekly/monthly (bản cuối của mỗi ngày/tuần/tháng).
+     * Lịch cũ chỉ có 'retention' = giữ N bản mới nhất như trước.
+     */
+    public static function jobPolicy(array $job): array
+    {
+        $has = false;
+        $p = [];
+        foreach (['last', 'daily', 'weekly', 'monthly'] as $k) {
+            $has = $has || array_key_exists('keep_' . $k, $job);
+            $p[$k] = max(0, min(365, (int)($job['keep_' . $k] ?? 0)));
+        }
+        if (!$has) {
+            $p = ['last' => max(1, min(365, (int)($job['retention'] ?? 7))), 'daily' => 0, 'weekly' => 0, 'monthly' => 0];
+        }
+        if (array_sum($p) === 0) {
+            $p['last'] = 1;
+        }
+        return $p;
+    }
+
+    private static function groupPolicy(array $b, array $jobs): array
+    {
+        $settings = WNBStorage::settings();
+        if (($b['type'] ?? '') === 'snapshot') {
+            return ['last' => max(1, (int)$settings['max_snapshots_per_user'])];
+        }
+        if (($b['job_id'] ?? '') !== '') {
+            foreach ($jobs as $j) {
+                if ($j['id'] === $b['job_id']) {
+                    return self::jobPolicy($j);
+                }
+            }
+        }
+        return ['last' => max(1, (int)$settings['default_retention'])];
+    }
+
+    /**
+     * Chọn bản giữ lại (giống restic forget --keep-*): $list xếp mới -> cũ. Trả về [id => ['last'|'daily'|'weekly'|'monthly', ...]].
+     * Bản mới nhất luôn được giữ.
+     */
+    public static function retentionKeep(array $list, array $policy): array
+    {
+        $keep = [];
+        foreach (array_slice($list, 0, max(0, (int)($policy['last'] ?? 0))) as $b) {
+            $keep[$b['id']][] = 'last';
+        }
+        foreach (['daily' => 'Y-m-d', 'weekly' => 'o-W', 'monthly' => 'Y-m'] as $kind => $fmt) {
+            $limit = max(0, (int)($policy[$kind] ?? 0));
+            $seen = [];
+            foreach ($list as $b) {
+                if (count($seen) >= $limit) {
+                    break;
+                }
+                $period = date($fmt, strtotime((string)$b['created_at']) ?: 0);
+                if (!isset($seen[$period])) {
+                    $seen[$period] = true;
+                    $keep[$b['id']][] = $kind;
+                }
+            }
+        }
+        if ($list && !isset($keep[$list[0]['id']])) {
+            $keep[$list[0]['id']][] = 'last';
+        }
+        return $keep;
+    }
+
+    /** Lý do giữ của từng bản (để giao diện gắn nhãn Ngày/Tuần/Tháng). */
+    public static function retentionTags(array $backups): array
+    {
+        $jobs = WNBStorage::read('jobs');
+        $groups = [];
+        foreach ($backups as $b) {
+            $groups[self::groupKey($b)][] = $b;
+        }
+        $tags = [];
+        foreach ($groups as $list) {
+            usort($list, fn($a, $b) => strcmp((string)$b['created_at'], (string)$a['created_at']));
+            $tags += self::retentionKeep($list, self::groupPolicy($list[0], $jobs));
+        }
+        return $tags;
     }
 
     /** Xóa dữ liệu của một bản sao lưu; chỉ xóa đúng thư mục <user>/<id>. */
@@ -798,6 +1077,16 @@ final class WNBEngine
         if (($b['destination_type'] ?? 'local') === 'local' || WNB::isPreview()) {
             if (basename($path) === $b['id'] && basename(dirname($path)) === $b['username'] && !is_link($path)) {
                 self::rmrf($path);
+            }
+            return;
+        }
+        if (($b['format'] ?? '') === 'restic') {
+            // Chỉ "quên" snapshot; dữ liệu không còn dùng được dọn ở lượt bảo trì kho (prune).
+            $dest = self::findDestination((string)$b['destination_id']);
+            if ($dest && WNBRestic::usable()) {
+                WNBRestic::forget($dest, WNBRestic::snapshotIds($b));
+            } elseif ($dest) {
+                throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
             }
             return;
         }
@@ -868,6 +1157,9 @@ final class WNBEngine
             return ['message' => $done, 'warnings' => []];
         }
 
+        if (($b['format'] ?? '') === 'restic') {
+            return self::restoreRestic($task, $b, $sel, $done);
+        }
         $stage = '';
         $src = $b['storage_path'];
         $archive = ($b['format'] ?? 'folder') === 'archive';
@@ -1041,22 +1333,124 @@ final class WNBEngine
                     }
                 }
             }
-            // User phải đọc được toàn bộ dữ liệu dựng; nhóm (vd mail) được giữ nguyên.
-            WNBShell::run(sprintf('chown -hR %s %s', escapeshellarg($u), escapeshellarg($h)));
-            // Gốc staging mang quyền hiện tại của home để rsync -p không đổi quyền thư mục home.
-            @chmod($h, fileperms($pw['home']) & 07777);
-            @chmod($stage, 0711);
+            self::finishHomeRestore($u, $stage, $h, $warnings);
+        } finally {
+            self::rmrf($stage);
+        }
+    }
 
-            $rsync = WNBShell::which('rsync') ?: 'rsync';
-            $code = WNBShell::run(WNBShell::asUser($u, sprintf('%s -rlpt %s %s', escapeshellarg($rsync), escapeshellarg($h . '/'), escapeshellarg($pw['home'] . '/'))), $out);
-            if ($code === 23 || $code === 24) {
-                $warnings[] = WNBLang::msg('Một số file không ghi được (hết quota hoặc thiếu quyền): {detail}', ['detail' => WNBShell::tail($out, 2)]);
-            } elseif ($code !== 0) {
-                throw new WNBError('Ghi file vào home thất bại (mã {code}): {detail}', ['code' => $code, 'detail' => WNBShell::tail($out, 3)]);
+    /**
+     * $h là bản dựng (thuộc root) của các mục cần khôi phục, nằm trong $stage. Chuyển quyền cho user rồi rsync vào home
+     * BẰNG QUYỀN CỦA USER (không --delete: file mới sau thời điểm sao lưu được giữ nguyên).
+     */
+    private static function finishHomeRestore(string $u, string $stage, string $h, array &$warnings): void
+    {
+        $pw = WNBDirectAdmin::passwd($u);
+        if (!$pw || !is_dir($pw['home'])) {
+            throw new WNBError('Không tìm thấy thư mục home của tài khoản.');
+        }
+        // User phải đọc được toàn bộ dữ liệu dựng; nhóm (vd mail) được giữ nguyên.
+        WNBShell::run(sprintf('chown -hR %s %s', escapeshellarg($u), escapeshellarg($h)));
+        // Gốc bản dựng mang quyền hiện tại của home để rsync -p không đổi quyền thư mục home.
+        @chmod($h, fileperms($pw['home']) & 07777);
+        // User chỉ cần đi xuyên qua các thư mục cha (0711), không liệt kê được.
+        for ($d = dirname($h); strlen($d) >= strlen($stage); $d = dirname($d)) {
+            @chmod($d, 0711);
+            if ($d === $stage) {
+                break;
+            }
+        }
+        $rsync = WNBShell::which('rsync') ?: 'rsync';
+        $code = WNBShell::run(WNBShell::asUser($u, sprintf('%s -rlpt %s %s', escapeshellarg($rsync), escapeshellarg($h . '/'), escapeshellarg($pw['home'] . '/'))), $out);
+        if ($code === 23 || $code === 24) {
+            $warnings[] = WNBLang::msg('Một số file không ghi được (hết quota hoặc thiếu quyền): {detail}', ['detail' => WNBShell::tail($out, 2)]);
+        } elseif ($code !== 0) {
+            throw new WNBError('Ghi file vào home thất bại (mã {code}): {detail}', ['code' => $code, 'detail' => WNBShell::tail($out, 3)]);
+        }
+    }
+
+    /**
+     * Khôi phục từ kho restic: restore đúng các mục đã chọn (kèm thư mục cấu hình) vào staging của root,
+     * home được rsync vào bằng quyền user; database được restic dump thẳng vào mysql.
+     */
+    private static function restoreRestic(array $task, array $b, array $sel, array $done): array
+    {
+        $dest = self::findDestination((string)$b['destination_id']);
+        if (!$dest) {
+            throw new WNBError('Kho lưu trữ đã bị xóa.');
+        }
+        if (!WNBRestic::usable()) {
+            throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
+        }
+        $r = (array)$b['restic'];
+        $u = $b['username'];
+        $warnings = [];
+        $homeItems = $sel['home'];
+        foreach ($homeItems === [''] ? [] : $sel['emails'] as $email) {
+            [$box, $domain] = explode('@', $email, 2);
+            $homeItems[] = 'imap/' . $domain . '/' . $box;
+        }
+        $homePath = rtrim((string)$r['home_path'], '/');
+        $includes = [(string)$r['meta_path']];
+        if ($homeItems && $homePath !== '') {
+            foreach ($homeItems === [''] ? [''] : $homeItems as $rel) {
+                $includes[] = $rel === '' ? $homePath : $homePath . '/' . $rel;
+            }
+        }
+        $stage = self::stagingRoot() . '/restore_' . $task['id'];
+        self::mkdirSecure($stage, 0700);
+        try {
+            if ($homeItems === ['']) {
+                $need = (float)$b['size_mb'] * 1048576;
+                $free = @disk_free_space($stage);
+                if ($free !== false && $need > $free * 0.95) {
+                    throw new WNBError('Không đủ dung lượng trống để dựng dữ liệu khôi phục (cần khoảng {gb} GB).', ['gb' => round($need / 1073741824, 1)]);
+                }
+            }
+            self::step($task, 10, 'Tải dữ liệu cần thiết từ cloud');
+            $args = 'restore --retry-lock 30m ' . escapeshellarg((string)$r['home']) . ' --target ' . escapeshellarg($stage)
+                . implode('', array_map(fn($p) => ' --include ' . escapeshellarg(WNBRestic::literalPattern($p)), $includes));
+            if (WNBShell::run(WNBRestic::cmd($dest, $args, true), $out) !== 0) {
+                throw new WNBError('Tải bản sao lưu từ cloud thất bại: {detail}', ['detail' => WNBShell::tail($out, 3)]);
+            }
+            $src = $stage . $r['meta_path'];
+            if ($homeItems) {
+                self::step($task, 35, 'Khôi phục file vào thư mục home');
+                $h = $stage . $homePath;
+                foreach ($homeItems === [''] ? [] : $sel['home'] as $rel) {
+                    if (!file_exists($h . '/' . $rel) && !is_link($h . '/' . $rel)) {
+                        $warnings[] = WNBLang::msg('Bỏ qua {item}: không có trong bản sao lưu.', ['item' => $rel]);
+                    }
+                }
+                if ($homePath === '' || !is_dir($h)) {
+                    if ($homeItems === ['']) {
+                        throw new WNBError('Bản sao lưu không có dữ liệu home.');
+                    }
+                } else {
+                    self::finishHomeRestore($u, $stage, $h, $warnings);
+                }
+            }
+            if ($sel['databases']) {
+                self::step($task, 65, 'Import database');
+                self::restoreDatabases($sel['databases'], '', $warnings, function (string $db) use ($dest, $r) {
+                    $snap = (string)($r['dbs'][$db] ?? '');
+                    return $snap === '' ? null : WNBRestic::cmd($dest, 'dump --retry-lock 30m ' . escapeshellarg($snap) . ' ' . escapeshellarg('/' . $db . '.sql'), true);
+                });
+            }
+            if ($sel['emails']) {
+                self::restoreEmailAccounts($sel['emails'], $src . '/emails', $warnings);
+            }
+            if ($sel['dns']) {
+                self::step($task, 85, 'Khôi phục DNS');
+                self::restoreDns($sel['dns'], $src . '/dns', $warnings);
+            }
+            if ($sel['cron']) {
+                self::restoreCron($u, $src, $warnings);
             }
         } finally {
             self::rmrf($stage);
         }
+        return ['message' => $done, 'warnings' => $warnings];
     }
 
     /**
@@ -1123,19 +1517,21 @@ final class WNBEngine
         return true;
     }
 
-    private static function restoreDatabases(array $dbs, string $dir, array &$warnings): void
+    /** $source (tùy chọn): fn(db) => lệnh in nội dung SQL ra stdout, null nếu bản sao lưu không có database đó. */
+    private static function restoreDatabases(array $dbs, string $dir, array &$warnings, ?callable $source = null): void
     {
         $mysql = WNBShell::which('mysql') ?: 'mysql';
         $cnf = WNBDirectAdmin::mysqlDefaultsFile();
         try {
             foreach ($dbs as $db) {
                 $file = $dir . '/' . $db . '.sql.gz';
-                if (!is_file($file)) {
+                $from = $source ? $source($db) : (is_file($file) ? 'gzip -dc ' . escapeshellarg($file) : null);
+                if ($from === null) {
                     $warnings[] = WNBLang::msg('Bản sao lưu không có dump của {db}.', ['db' => $db]);
                     continue;
                 }
                 WNBShell::run(sprintf('%s --defaults-extra-file=%s -e %s', escapeshellarg($mysql), escapeshellarg($cnf), escapeshellarg('CREATE DATABASE IF NOT EXISTS `' . $db . '`')));
-                $code = WNBShell::bash(sprintf('gzip -dc %s | %s --defaults-extra-file=%s %s', escapeshellarg($file), escapeshellarg($mysql), escapeshellarg($cnf), escapeshellarg($db)), $out);
+                $code = WNBShell::bash(sprintf('%s | %s --defaults-extra-file=%s %s', $from, escapeshellarg($mysql), escapeshellarg($cnf), escapeshellarg($db)), $out);
                 if ($code !== 0) {
                     $warnings[] = WNBLang::msg('Import {db} lỗi: {detail}', ['db' => $db, 'detail' => WNBShell::tail($out, 2)]);
                 }
@@ -1236,7 +1632,12 @@ final class WNBEngine
                 file_put_contents($file, gzencode(json_encode($b, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)));
             } else {
                 $src = $b['storage_path'];
-                if (($b['destination_type'] ?? 'local') !== 'local') {
+                if (($b['format'] ?? '') === 'restic') {
+                    self::step($task, 15, 'Tải bản sao lưu từ cloud');
+                    $stage = self::stagingRoot() . '/dl_' . $task['id'];
+                    self::mkdirSecure($stage, 0700);
+                    $src = self::resticExport($b, $stage);
+                } elseif (($b['destination_type'] ?? 'local') !== 'local') {
                     self::step($task, 15, 'Tải bản sao lưu từ cloud');
                     $stage = self::stagingRoot() . '/dl_' . $task['id'];
                     self::mkdirSecure($stage, 0700);
@@ -1278,6 +1679,45 @@ final class WNBEngine
         return ['message' => WNBLang::msg('File tải về đã sẵn sàng ({size} MB), tự xóa sau {hours} giờ', ['size' => $record['size_mb'], 'hours' => $ttl]), 'warnings' => []];
     }
 
+    /**
+     * Dựng bản sao lưu restic thành cây thư mục giống bản local (homedir/, databases/*.sql.gz, config/, dns/...) để nén tải về.
+     */
+    private static function resticExport(array $b, string $stage): string
+    {
+        $dest = self::findDestination((string)$b['destination_id']);
+        if (!$dest) {
+            throw new WNBError('Kho lưu trữ đã bị xóa.');
+        }
+        if (!WNBRestic::usable()) {
+            throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
+        }
+        $r = (array)$b['restic'];
+        $raw = $stage . '/raw';
+        $out = $stage . '/out';
+        self::mkdirSecure($raw, 0700);
+        self::mkdirSecure($out . '/databases', 0700);
+        if (WNBShell::run(WNBRestic::cmd($dest, 'restore --retry-lock 30m ' . escapeshellarg((string)$r['home']) . ' --target ' . escapeshellarg($raw), true), $o) !== 0) {
+            throw new WNBError('Tải bản sao lưu từ cloud thất bại: {detail}', ['detail' => WNBShell::tail($o, 3)]);
+        }
+        $home = $raw . rtrim((string)$r['home_path'], '/');
+        if ((string)$r['home_path'] !== '' && is_dir($home)) {
+            @rename($home, $out . '/homedir');
+        }
+        foreach (@scandir($raw . $r['meta_path']) ?: [] as $e) {
+            if ($e !== '.' && $e !== '..') {
+                @rename($raw . $r['meta_path'] . '/' . $e, $out . '/' . $e);
+            }
+        }
+        foreach ((array)($r['dbs'] ?? []) as $db => $snap) {
+            $code = WNBShell::bash(WNBRestic::cmd($dest, 'dump --retry-lock 30m ' . escapeshellarg((string)$snap) . ' ' . escapeshellarg('/' . $db . '.sql'), true) . ' | gzip -c > ' . escapeshellarg($out . '/databases/' . $db . '.sql.gz'), $o);
+            if ($code !== 0) {
+                throw new WNBError('Tải bản sao lưu từ cloud thất bại: {detail}', ['detail' => WNBShell::tail($o, 3)]);
+            }
+        }
+        self::rmrf($raw);
+        return $out;
+    }
+
     private static function deleteBackupTask(array $task): array
     {
         $b = self::findBackup($task['backup_id']);
@@ -1304,6 +1744,134 @@ final class WNBEngine
                 return true;
             }));
         });
+    }
+
+    /* ============================== Kho restic: bảo trì, quét lại ============================== */
+
+    private static function updateDestination(string $id, array $changes): void
+    {
+        WNBStorage::update('destinations', function ($l) use ($id, $changes) {
+            foreach ($l as &$d) {
+                if ($d['id'] === $id) {
+                    $d = array_merge($d, $changes);
+                    return $l;
+                }
+            }
+            return null;
+        });
+    }
+
+    /**
+     * Mỗi ngày một lần với mỗi kho restic: dọn dữ liệu không còn snapshot nào dùng (prune), mỗi tuần kiểm tra
+     * tính toàn vẹn (check). Không chen vào lúc kho đang có tác vụ sao lưu.
+     */
+    public static function scheduleMaintenance(): void
+    {
+        if (!WNBRestic::usable()) {
+            return;
+        }
+        $queue = WNBStorage::read('queue');
+        foreach (WNBStorage::read('destinations') as $d) {
+            if (WNBRclone::destFormat($d) !== 'restic' || !WNBRestic::hasKey($d['id'])) {
+                continue;
+            }
+            if (time() - (int)($d['restic_maint']['prune_ts'] ?? 0) < 86400) {
+                continue;
+            }
+            foreach ($queue as $t) {
+                if (in_array($t['status'], ['pending', 'running'], true) && ($t['destination_id'] ?? '') === $d['id']) {
+                    continue 2;
+                }
+            }
+            if (!array_filter(WNBStorage::read('backups'), fn($b) => $b['destination_id'] === $d['id'])) {
+                continue;
+            }
+            self::enqueue(['type' => 'maintain', 'username' => '', 'initiated_by' => 'cron', 'destination_id' => $d['id']]);
+        }
+    }
+
+    private static function maintainRepo(array $task): array
+    {
+        $dest = self::findDestination((string)$task['destination_id']);
+        if (!$dest || WNBRclone::destFormat($dest) !== 'restic') {
+            throw new WNBError('Kho lưu trữ đã bị xóa.');
+        }
+        if (!WNBRestic::usable()) {
+            throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
+        }
+        $m = (array)($dest['restic_maint'] ?? []);
+        $now = time();
+        // Khóa bỏ lại của tiến trình đã chết (máy chủ khởi động lại giữa chừng) sẽ chặn prune.
+        WNBShell::run(WNBRestic::cmd($dest, 'unlock'));
+        self::step($task, 20, 'Dọn dữ liệu không còn dùng trong kho {dest}', ['dest' => $dest['name']]);
+        $code = WNBShell::run(WNBShell::lowPriorityPrefix() . WNBRestic::cmd($dest, 'prune --max-unused 10% --retry-lock 30m', true), $out);
+        $m['prune_ts'] = $now;
+        $m['prune_ok'] = $code === 0;
+        $m['prune_msg'] = $code === 0 ? '' : WNBShell::tail($out, 3);
+        if ($code === 0 && $now - (int)($m['check_ts'] ?? 0) >= 7 * 86400) {
+            self::step($task, 70, 'Kiểm tra tính toàn vẹn kho {dest}', ['dest' => $dest['name']]);
+            $code = WNBShell::run(WNBShell::lowPriorityPrefix() . WNBRestic::cmd($dest, 'check --retry-lock 30m'), $out);
+            $m['check_ts'] = $now;
+            $m['check_ok'] = $code === 0;
+            $m['check_msg'] = $code === 0 ? '' : WNBShell::tail($out, 3);
+            $checked = true;
+        }
+        self::updateDestination($dest['id'], ['restic_maint' => $m]);
+        if (!$m['prune_ok']) {
+            throw new WNBError('Dọn kho restic {dest} thất bại: {detail}', ['dest' => $dest['name'], 'detail' => $m['prune_msg']]);
+        }
+        if (isset($checked) && !$m['check_ok']) {
+            throw new WNBError('Kiểm tra kho restic {dest} phát hiện lỗi: {detail}', ['dest' => $dest['name'], 'detail' => $m['check_msg']]);
+        }
+        return ['message' => WNBLang::msg(isset($checked) ? 'Đã dọn và kiểm tra kho {dest}: không có lỗi' : 'Đã dọn kho {dest}', ['dest' => $dest['name']]), 'warnings' => []];
+    }
+
+    /** Nạp lại danh sách bản sao lưu từ kho restic (sau khi cài lại máy chủ hoặc mất dữ liệu plugin). */
+    private static function rescanRepo(array $task): array
+    {
+        $dest = self::findDestination((string)$task['destination_id']);
+        if (!$dest || WNBRclone::destFormat($dest) !== 'restic') {
+            throw new WNBError('Kho lưu trữ đã bị xóa.');
+        }
+        if (WNB::isPreview()) {
+            return ['message' => WNBLang::msg('Đã nạp {n} bản sao lưu từ kho {dest}.', ['n' => 0, 'dest' => $dest['name']]), 'warnings' => []];
+        }
+        if (!WNBRestic::usable()) {
+            throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
+        }
+        self::step($task, 10, 'Đọc danh sách snapshot trong kho {dest}', ['dest' => $dest['name']]);
+        $code = WNBShell::run(WNBRestic::cmd($dest, 'snapshots --json --no-lock --tag wnb'), $out);
+        $raw = implode("
+", $out);
+        $start = strpos($raw, '[');
+        $snaps = ($code === 0 && $start !== false) ? json_decode(substr($raw, $start), true) : null;
+        if (!is_array($snaps)) {
+            throw new WNBError('Không đọc được danh sách file trên cloud: {detail}', ['detail' => WNBShell::tail($out, 2)]);
+        }
+        $records = WNBRestic::recordsFromSnapshots($snaps, $dest, array_column(WNBStorage::read('backups'), 'id'));
+        foreach ($records as $i => $rec) {
+            self::step($task, 20 + (int)(70 * $i / max(1, count($records))), 'Đọc thông tin bản {id}', ['id' => $rec['id']]);
+            $m = [];
+            if (WNBShell::run(WNBRestic::cmd($dest, 'dump --no-lock ' . escapeshellarg($rec['restic']['home']) . ' ' . escapeshellarg($rec['restic']['meta_path'] . '/manifest.json')), $m) === 0) {
+                $man = json_decode(implode("
+", $m), true);
+                if (is_array($man)) {
+                    foreach (['reseller', 'domain', 'domains', 'emails', 'crons', 'note'] as $k) {
+                        if (isset($man[$k])) {
+                            $records[$i][$k] = $man[$k];
+                        }
+                    }
+                }
+            }
+        }
+        if ($records) {
+            WNBStorage::update('backups', function ($list) use ($records) {
+                $list = array_merge($list, $records);
+                usort($list, fn($a, $b) => strcmp((string)$b['created_at'], (string)$a['created_at']));
+                return $list;
+            });
+        }
+        return ['message' => WNBLang::msg('Đã nạp {n} bản sao lưu từ kho {dest}.', ['n' => count($records), 'dest' => $dest['name']]), 'warnings' => []];
     }
 
     /* ============================== Lịch tự động ============================== */
@@ -1545,9 +2113,24 @@ final class WNBEngine
                 $issues[] = ['code' => 'dest_missing:' . $j['id'], 'msg' => WNBLang::msg('Lịch "{job}" dùng kho lưu trữ đã bị xóa.', ['job' => $j['name']])];
                 continue;
             }
+            if (WNBRclone::destFormat($dest) === 'restic') {
+                if (!WNB::isPreview() && !WNBRestic::usable()) {
+                    $issues[] = ['code' => 'restic_missing', 'msg' => WNBLang::msg('Lịch "{job}" dùng kho restic nhưng máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root.', ['job' => $j['name'], 'min' => WNBRestic::MIN_VERSION])];
+                }
+                $m = (array)($dest['restic_maint'] ?? []);
+                if (isset($m['check_ok']) && !$m['check_ok']) {
+                    $issues[] = ['code' => 'restic_check:' . $dest['id'], 'msg' => WNBLang::msg('Kiểm tra kho restic {dest} phát hiện lỗi: {detail}', ['dest' => $dest['name'], 'detail' => (string)($m['check_msg'] ?? '')])];
+                }
+                if (isset($m['prune_ok']) && !$m['prune_ok']) {
+                    $issues[] = ['code' => 'restic_prune:' . $dest['id'], 'msg' => WNBLang::msg('Dọn kho restic {dest} thất bại: {detail}', ['dest' => $dest['name'], 'detail' => (string)($m['prune_msg'] ?? '')])];
+                }
+            }
             if ($dest['type'] === 'local') {
                 $path = rtrim((string)$dest['path'], '/');
                 $need = [(float)$settings['min_free_gb'], self::MIN_FREE_INODES];
+            } elseif (WNBRclone::destFormat($dest) === 'restic') {
+                $path = rtrim((string)$settings['local_backup_root'], '/');
+                $need = [self::RESTIC_MIN_FREE_GB, self::ARCHIVE_MIN_FREE_INODES];
             } else {
                 $path = rtrim((string)$settings['local_backup_root'], '/');
                 $need = WNBRclone::destFormat($dest) === 'archive' ? [self::ARCHIVE_MIN_FREE_GB, self::ARCHIVE_MIN_FREE_INODES] : [(float)$settings['min_free_gb'], self::MIN_FREE_INODES];

@@ -8,6 +8,8 @@ final class WNBApi
 {
     private const ROLES = ['admin', 'reseller', 'user'];
     private const READ_ACTIONS = ['state', 'browse', 'task_log'];
+    /** Mặc định của lịch mới: 7 ngày gần nhất, 4 tuần, 3 tháng. */
+    public const DEFAULT_KEEP = ['keep_last' => 0, 'keep_daily' => 7, 'keep_weekly' => 4, 'keep_monthly' => 3];
 
     /** Kiểm tra user có thật sự được dùng cấp $role không (dựa vào usertype trong DirectAdmin). */
     public static function verifyIdentity(string $user, string $role): void
@@ -167,8 +169,27 @@ final class WNBApi
 
             case 'dest_save':
                 self::requireAdmin($role);
-                [$key, $vars, $ok] = self::saveDestination($p);
-                return $done($key, $vars, ['test_ok' => $ok]);
+                [$key, $vars, $ok, $newKey] = self::saveDestination($p);
+                return $done($key, $vars, ['test_ok' => $ok, 'restic_new_key' => $newKey]);
+
+            case 'dest_restic_key':
+                // Admin xem mật khẩu kho restic để cất giữ ngoài máy chủ (mất mật khẩu = mất toàn bộ bản sao lưu trong kho).
+                self::requireAdmin($role);
+                $dest = WNBEngine::findDestination($str('id'));
+                if (!$dest || WNBRclone::destFormat($dest) !== 'restic' || !WNBRestic::hasKey($dest['id'])) {
+                    throw new WNBError('Kho lưu trữ không tồn tại.');
+                }
+                return ['password' => WNBRestic::password($dest['id']), 'repository' => WNBRestic::repo($dest)];
+
+            case 'dest_rescan':
+                self::requireAdmin($role);
+                $dest = WNBEngine::findDestination($str('id'));
+                if (!$dest || WNBRclone::destFormat($dest) !== 'restic') {
+                    throw new WNBError('Kho lưu trữ không tồn tại.');
+                }
+                WNBEngine::enqueue(['type' => 'rescan', 'username' => '', 'initiated_by' => $user, 'role' => $role, 'destination_id' => $dest['id']]);
+                WNBEngine::kick();
+                return $done('Đang quét kho, danh sách bản sao lưu sẽ cập nhật khi xong.');
 
             case 'dest_test':
                 self::requireAdmin($role);
@@ -310,11 +331,14 @@ final class WNBApi
         $lastByUser = [];
         $countByUser = [];
         $totalMb = 0.0;
-        foreach (WNBStorage::read('backups') as $b) {
+        $allBackups = WNBStorage::read('backups');
+        $keepTags = WNBEngine::retentionTags($allBackups);
+        foreach ($allBackups as $b) {
             if (!isset($visibleSet[$b['username']]) || !self::ownedByCurrent($role, $b)) {
                 continue;
             }
-            unset($b['storage_path'], $b['owner_key']);
+            $b['keep'] = $keepTags[$b['id']] ?? [];
+            unset($b['storage_path'], $b['owner_key'], $b['restic']);
             $b['warnings'] = array_map([WNBLang::class, 'render'], (array)($b['warnings'] ?? []));
             $backups[] = $b;
             $totalMb += (float)$b['size_mb'];
@@ -339,7 +363,7 @@ final class WNBApi
         $failed24 = 0;
         $dayAgo = date('Y-m-d H:i:s', time() - 86400);
         foreach (WNBStorage::read('queue') as $t) {
-            if (!isset($visibleSet[$t['username']])) {
+            if (!isset($visibleSet[$t['username']]) && !($role === 'admin' && $t['username'] === '')) {
                 continue;
             }
             unset($t['pid'], $t['lang']);
@@ -377,6 +401,7 @@ final class WNBApi
                 unset($params['type']);
                 $d['params'] = $params;
                 $d['format'] = WNBRclone::destFormat($d);
+                $d['restic_key'] = $d['format'] === 'restic' && WNBRestic::hasKey($d['id']);
                 if (isset($d['last_test']['message'])) {
                     $d['last_test']['message'] = WNBLang::render($d['last_test']['message']);
                 }
@@ -392,7 +417,7 @@ final class WNBApi
             'version' => WNB_VERSION,
             'preview' => WNB::isPreview(),
             'now' => WNB::now(),
-            'engine' => ['ready' => true, 'rclone' => WNBRclone::installed(), 'rclone_version' => WNBRclone::version()],
+            'engine' => ['ready' => true, 'rclone' => WNBRclone::installed(), 'rclone_version' => WNBRclone::version(), 'restic' => WNB::isPreview() || WNBRestic::usable(), 'restic_version' => WNBRestic::version()],
             'perms' => self::perms($user, $role),
             'accounts' => $accounts,
             'backups' => $backups,
@@ -421,6 +446,7 @@ final class WNBApi
                 $next = WNBEngine::nextRun($j);
                 $j['next_run'] = $next ? date('Y-m-d H:i:s', $next) : null;
                 $j['target_count'] = count(WNBEngine::jobTargets($j));
+                $j['policy'] = WNBEngine::jobPolicy($j);
                 return $j;
             }, WNBStorage::read('jobs'));
             $acl = WNBStorage::read('acl');
@@ -617,7 +643,8 @@ final class WNBApi
             }
             $rec['remote'] = $existing['remote'] ?? 'wnb_' . substr($id, 5);
             $rec['subpath'] = $sub;
-            $rec['format'] = WNBRclone::supportsArchive($type) && (string)($p['format'] ?? 'archive') !== 'folder' ? 'archive' : 'folder';
+            $fmt = (string)($p['format'] ?? 'archive');
+            $rec['format'] = $fmt === 'restic' ? 'restic' : (WNBRclone::supportsArchive($type) && $fmt !== 'folder' ? 'archive' : 'folder');
             $input = [];
             foreach (WNBRclone::TYPES[$type]['fields'] as $f) {
                 $input[$f] = (string)($p['p_' . $f] ?? '');
@@ -628,6 +655,10 @@ final class WNBApi
         $test = WNBRclone::test($rec);
         $rec['free_gb'] = $test['free_gb'];
         $rec['last_test'] = ['ok' => $test['ok'], 'message' => $test['message'], 'at' => WNB::now()];
+        $newKey = false;
+        if (($rec['format'] ?? '') === 'restic') {
+            $newKey = self::setupRestic($rec, trim((string)($p['restic_password'] ?? '')), $test['ok']);
+        }
         WNBStorage::update('destinations', function ($l) use ($rec) {
             foreach ($l as &$d) {
                 if ($d['id'] === $rec['id']) {
@@ -638,7 +669,43 @@ final class WNBApi
             $l[] = $rec;
             return $l;
         });
-        return ['Đã lưu kho "{name}". {detail}', ['name' => $name, 'detail' => $test['message']], $test['ok']];
+        return ['Đã lưu kho "{name}". {detail}', ['name' => $name, 'detail' => $test['message']], $test['ok'], $newKey];
+    }
+
+    /**
+     * Mật khẩu + kho restic. Mật khẩu nhập tay dùng để kết nối lại kho đã có (vd cài lại máy chủ);
+     * để trống thì giữ mật khẩu cũ hoặc tự tạo mật khẩu mạnh. Trả về true nếu vừa tạo mật khẩu mới (giao diện nhắc cất giữ).
+     */
+    private static function setupRestic(array $rec, string $password, bool $reachable): bool
+    {
+        if ($password !== '' && strlen($password) < 8) {
+            throw new WNBError('Mật khẩu kho restic phải có ít nhất 8 ký tự.');
+        }
+        if (!WNB::isPreview() && !WNBRestic::usable()) {
+            throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
+        }
+        $old = WNBRestic::password($rec['id']);
+        $generated = false;
+        if ($password !== '') {
+            WNBRestic::setPassword($rec['id'], $password);
+        } elseif ($old === '') {
+            WNBRestic::setPassword($rec['id'], WNBRestic::generatePassword());
+            $generated = true;
+        }
+        if (!WNB::isPreview() && $reachable) {
+            try {
+                WNBRestic::ensureRepo($rec);
+            } catch (Throwable $e) {
+                // Sai mật khẩu với kho đã có: trả lại mật khẩu cũ, không ghi đè.
+                if ($old !== '') {
+                    WNBRestic::setPassword($rec['id'], $old);
+                } else {
+                    @unlink(WNBRestic::keyFile($rec['id']));
+                }
+                throw $e;
+            }
+        }
+        return $generated;
     }
 
     /**
@@ -710,13 +777,29 @@ final class WNBApi
             'schedule_time' => (string)($p['schedule_time'] ?? '02:00'),
             'schedule_weekday' => max(0, min(6, (int)($p['schedule_weekday'] ?? 0))),
             'interval_hours' => max(1, min(24, (int)($p['interval_hours'] ?? 6))),
-            'retention' => max(1, min(365, (int)($p['retention'] ?? 7))),
             'exclude_users' => array_values(array_filter(self::listParam($p, 'exclude_users'), [WNBDirectAdmin::class, 'validUsername'])),
             'exclude_resellers' => array_values(array_filter(self::listParam($p, 'exclude_resellers'), [WNBDirectAdmin::class, 'isOwnerAccount'])),
             'skip_suspended' => (string)($p['skip_suspended'] ?? '0') === '1',
             'enabled' => (string)($p['enabled'] ?? '1') === '1',
         ]);
         unset($job['target'], $job['users'], $job['resellers']); // bỏ chế độ "chọn tài khoản" của bản cũ
+
+        // Giữ bản theo ngày/tuần/tháng. Gửi kiểu cũ 'retention' = giữ N bản mới nhất.
+        $keys = ['keep_last', 'keep_daily', 'keep_weekly', 'keep_monthly'];
+        if (array_intersect($keys, array_keys($p))) {
+            foreach ($keys as $k) {
+                $job[$k] = max(0, min(365, (int)($p[$k] ?? 0)));
+            }
+        } elseif (isset($p['retention'])) {
+            $job = array_merge($job, ['keep_last' => max(1, min(365, (int)$p['retention'])), 'keep_daily' => 0, 'keep_weekly' => 0, 'keep_monthly' => 0]);
+        } elseif (!$existing) {
+            $job = array_merge($job, self::DEFAULT_KEEP);
+        }
+        $policy = WNBEngine::jobPolicy($job);
+        foreach ($policy as $k => $v) {
+            $job['keep_' . $k] = $v;
+        }
+        unset($job['retention']);
         return $job;
     }
 

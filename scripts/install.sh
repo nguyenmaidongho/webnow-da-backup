@@ -97,6 +97,41 @@ if ! command -v rclone >/dev/null 2>&1 && [ "${WNB_SKIP_RCLONE:-0}" != "1" ]; th
     fi
 fi
 
+# 5b. restic cho kho incremental (bỏ qua bằng WNB_SKIP_RESTIC=1). Cần 0.17 trở lên.
+RESTIC_VERSION=0.17.3
+NEED_RESTIC=1
+if command -v restic >/dev/null 2>&1; then
+    CUR=$(restic version 2>/dev/null | awk '{print $2}')
+    if [ -n "$CUR" ] && [ "$(printf '%s\n%s\n' "0.17.0" "$CUR" | sort -V | head -n1)" = "0.17.0" ]; then
+        NEED_RESTIC=0
+    fi
+fi
+if [ "$NEED_RESTIC" = "1" ] && [ "${WNB_SKIP_RESTIC:-0}" != "1" ]; then
+    case "$(uname -m)" in
+        x86_64|amd64) RA=amd64 ;;
+        aarch64|arm64) RA=arm64 ;;
+        *) RA="" ;;
+    esac
+    if [ -z "$RA" ] || ! command -v bunzip2 >/dev/null 2>&1; then
+        echo "[!] Không tự cài được restic (cần máy amd64/arm64 và bunzip2). Kho kiểu Incremental sẽ chưa dùng được."
+    else
+        echo "[*] Cài restic $RESTIC_VERSION từ GitHub..."
+        URL="https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}"
+        FILE="restic_${RESTIC_VERSION}_linux_${RA}.bz2"
+        TMPD=$(mktemp -d /tmp/wnb_restic.XXXXXX)
+        WANT=$(curl -fsSL "$URL/SHA256SUMS" 2>/dev/null | awk -v f="$FILE" '$2==f || $2=="*"f {print $1}')
+        if curl -fsSL "$URL/$FILE" -o "$TMPD/$FILE" \
+            && [ -n "$WANT" ] && [ "$WANT" = "$(sha256sum "$TMPD/$FILE" | awk '{print $1}')" ] \
+            && bunzip2 -f "$TMPD/$FILE" && chmod 755 "$TMPD/${FILE%.bz2}" && "$TMPD/${FILE%.bz2}" version >/dev/null 2>&1; then
+            mv -f "$TMPD/${FILE%.bz2}" /usr/local/bin/restic
+            echo "[+] Đã cài restic $RESTIC_VERSION (đã kiểm tra SHA256)."
+        else
+            echo "[!] Không cài được restic (tải hoặc kiểm tra SHA256 thất bại). Kho kiểu Incremental sẽ chưa dùng được."
+        fi
+        rm -rf "$TMPD"
+    fi
+fi
+
 # 6. Vô hiệu hóa tàn dư của bản VaultBackup cũ (helper setuid không an toàn, socket 0666, dữ liệu 0777).
 OLD=/usr/local/directadmin/plugins/vaultbackup
 if [ -e "$OLD" ] || [ -f /etc/systemd/system/vaultbackup.service ] || [ -f /etc/cron.d/vaultbackup ]; then

@@ -3,11 +3,13 @@
 Plugin sao lưu và khôi phục cho DirectAdmin (Evolution), dùng cho cả Admin, Reseller và User.
 
 - **Kho local**: incremental bằng hardlink (`rsync --link-dest`). Mỗi bản chỉ tốn dung lượng cho phần thay đổi.
-- **Kho cloud** qua rclone: S3/Wasabi/MinIO, Cloudflare R2, Backblaze B2, SFTP, FTP, WebDAV, Google Drive, OneDrive. Hai kiểu lưu:
+- **Kho cloud** qua rclone: S3/Wasabi/MinIO, Cloudflare R2, Backblaze B2, SFTP, FTP, WebDAV, Google Drive, OneDrive. Ba kiểu lưu:
+  - **Incremental (restic)**, khuyên dùng: lần đầu tải đầy đủ, sau đó chỉ tải phần thay đổi; dữ liệu trùng giữa các lần và giữa các tài khoản chỉ lưu một lần; mã hóa; database được `mysqldump` thẳng vào restic. Mỗi kho có mật khẩu riêng (plugin tự tạo, admin xem và cất giữ được); **mất mật khẩu là mất toàn bộ bản sao lưu trong kho**. Có "Quét lại kho" để nạp lại danh sách bản sao lưu sau khi cài lại máy chủ, bảo trì kho tự động (prune mỗi ngày, check mỗi tuần).
   - **Nén** (mặc định cho S3, R2, B2, SFTP, FTP, Google Drive): home và database được nén rồi đẩy thẳng lên cloud theo luồng (`tar | gzip | rclone rcat`), máy chủ chỉ cần vài trăm MB trống, nhanh hơn nhiều so với tải từng file. Kèm danh sách file (`homedir.index.gz`) để vẫn duyệt và khôi phục được từng file; khôi phục giải nén thẳng vào home bằng quyền của user.
   - **Thư mục**: mỗi file là một object, duyệt/khôi phục từng file trực tiếp nhưng tải lên chậm và cần chỗ trống local bằng dung lượng tài khoản.
 - **Giám sát nguy cơ mất dữ liệu**: mỗi 30 phút kiểm tra ổ đĩa (GB và inode), tài khoản quá hạn chưa có bản sao lưu, lịch không chạy đúng giờ, lượt chạy lỗi; báo qua Telegram/email khi có vấn đề mới, nhắc lại mỗi 24 giờ và báo khi đã ổn. Hiện banner ở Tổng quan.
 - **Khôi phục từng phần**: file/thư mục, database, hộp thư email, DNS zone, cron, hoặc toàn bộ tài khoản.
+- **Giữ bản theo ngày/tuần/tháng** (như JetBackup): ví dụ một lịch hằng ngày giữ 7 ngày gần nhất + 4 tuần + 3 tháng (bản cuối của mỗi kỳ), bản cũ hơn tự xóa. Ô "Mới nhất" giữ thêm N bản bất kỳ gần nhất.
 - **Lịch tự động**: hằng ngày, hằng tuần hoặc theo số giờ. Lịch luôn sao lưu tất cả tài khoản (kể cả tài khoản tạo sau này), chỉ trừ các tài khoản bị loại trừ; mỗi lịch có danh sách loại trừ và số bản giữ lại riêng. **Loại trừ theo reseller** (như Resellers Filter của JetBackup): loại trừ một reseller thì cả reseller lẫn toàn bộ khách của họ, kể cả khách tạo sau này, không được sao lưu (chọn `admin` cho khách do Admin tạo). Danh sách "Không bao giờ tự sao lưu" (theo reseller và theo tài khoản) áp dụng cho mọi lịch.
 - **Snapshot** do khách tự tạo, **tải bản sao lưu** dạng `.tar.gz`, **phân quyền** theo từng reseller, **hạn mức** dung lượng.
 - **Thông báo** qua Telegram và email: báo cáo sau mỗi lượt chạy lịch, báo lỗi tác vụ thủ công. Token Telegram chỉ ghi đè được, không xem lại được.
@@ -24,7 +26,7 @@ Plugin sao lưu và khôi phục cho DirectAdmin (Evolution), dùng cho cả Adm
    sh /usr/local/directadmin/plugins/webnowbackup/scripts/install.sh
    ```
 
-   Lệnh này sẽ biên dịch helper (cần `gcc`), tạo `/backup/webnowbackup`, tạo cron `/etc/cron.d/webnowbackup` và cài rclone nếu chưa có (bỏ qua bằng `WNB_SKIP_RCLONE=1`). Lệnh cũng vô hiệu hóa phần chạy bằng root của plugin VaultBackup cũ nếu máy còn sót.
+   Lệnh này sẽ biên dịch helper (cần `gcc`), tạo `/backup/webnowbackup`, tạo cron `/etc/cron.d/webnowbackup`, cài rclone nếu chưa có (bỏ qua bằng `WNB_SKIP_RCLONE=1`) và cài restic 0.17.3 từ GitHub có kiểm tra SHA256 nếu chưa có restic 0.17 trở lên (bỏ qua bằng `WNB_SKIP_RESTIC=1`). Lệnh cũng vô hiệu hóa phần chạy bằng root của plugin VaultBackup cũ nếu máy còn sót.
 4. Mở DirectAdmin → WebNowBackup → **Lịch tự động** rồi bật lịch.
 
 Sau mỗi lần cập nhật plugin, nên chạy lại lệnh ở bước 3.
