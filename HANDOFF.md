@@ -15,7 +15,8 @@ Lịch có 2 chế độ (`filter_mode`, 2.4.0 — người dùng yêu cầu th�
 - `exclude` (mặc định, lịch cũ không có trường này): sao lưu TẤT CẢ tài khoản (kể cả tạo sau này), trừ `exclude_users` / `exclude_resellers`.
 - `include`: chỉ `include_users` + `include_resellers` (reseller = chính họ + khách, kể cả khách tạo sau). Lưu lịch include rỗng bị từ chối.
 - Chỉ lưu danh sách của chế độ đang dùng (danh sách chế độ kia để []). Danh sách chung "Không bao giờ tự sao lưu" (`settings.exclude_accounts`/`exclude_resellers`) luôn thắng ở cả hai chế độ.
-- State admin có `scheduled` (tài khoản thuộc ít nhất 1 lịch đang bật): tab Tài khoản gắn nhãn "Không có lịch", thẻ "chưa sao lưu 48 giờ" bỏ qua các tài khoản đó. Test: `tests/api_test5.php`; tổng 211/211 trên PHP 7.4 và 8.5.
+- 2.4.1: lịch có `keep_hours` (0–168, mặc định 24; policy key `hours`, nhãn giữ `recent`): giữ MỌI bản trong N giờ gần nhất trước khi áp quy tắc ngày/tuần/tháng (giống `restic forget --keep-within`). Lý do: người dùng chạy lịch 2 lần trong ngày thì bản trước bị thay vì "Hằng ngày" chỉ giữ bản cuối của ngày. Lịch có keep_* nhưng chưa có keep_hours → 24; lịch kiểu cũ chỉ có `retention` → 0 (giữ nguyên cách cũ).
+- State admin có `scheduled` (tài khoản thuộc ít nhất 1 lịch đang bật): tab Tài khoản gắn nhãn "Không có lịch", thẻ "chưa sao lưu 48 giờ" bỏ qua các tài khoản đó. Test: `tests/api_test5.php`; tổng 218/218 trên PHP 7.4 và 8.5.
 
 ## Đã làm: loại trừ theo reseller (giống JetBackup Resellers Filter)
 - Lịch có `exclude_resellers`, Cài đặt có `settings.exclude_resellers` (áp dụng mọi lịch). Giá trị hợp lệ: tài khoản usertype reseller hoặc admin (`WNBDirectAdmin::isOwnerAccount`).

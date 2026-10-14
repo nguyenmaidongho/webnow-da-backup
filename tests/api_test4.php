@@ -36,7 +36,7 @@ ok(array_keys($k2) === ['b0_0', 'b1_0', 'b2_0'], 'lịch theo giờ: giữ bản
 $k3 = WNBEngine::retentionKeep($hourly, ['last' => 5, 'daily' => 2]);
 ok(count($k3) === 5 && in_array('last', $k3['b1_0'], true) && in_array('daily', $k3['b1_0'], true), 'kết hợp mới nhất + ngày');
 ok(array_keys(WNBEngine::retentionKeep($hourly, [])) === ['b0_0'], 'không cấu hình gì vẫn giữ bản mới nhất');
-ok(WNBEngine::jobPolicy(['retention' => 5]) === ['last' => 5, 'daily' => 0, 'weekly' => 0, 'monthly' => 0], 'lịch cũ: retention = N bản mới nhất');
+ok(WNBEngine::jobPolicy(['retention' => 5]) === ['last' => 5, 'daily' => 0, 'weekly' => 0, 'monthly' => 0, 'hours' => 0], 'lịch cũ: retention = N bản mới nhất');
 ok(WNBEngine::jobPolicy(['keep_last' => 0, 'keep_daily' => 0, 'keep_weekly' => 0, 'keep_monthly' => 0])['last'] === 1, 'chính sách toàn 0 vẫn giữ 1 bản');
 
 // ---------- Lưu lịch với chính sách mới ----------
@@ -50,10 +50,10 @@ $findJob = function ($r, $name) {
 };
 $r = call('admin', 'admin', ['action' => 'job_save', 'name' => 'GFS', 'destination_id' => 'dest_local', 'schedule_type' => 'daily', 'schedule_time' => '02:00', 'csrf' => $ac]);
 $j = $findJob($r, 'GFS');
-ok($j && $j['policy'] === ['last' => 0, 'daily' => 7, 'weekly' => 4, 'monthly' => 3] && !isset($j['retention']), 'lịch mới mặc định 7 ngày/4 tuần/3 tháng: ' . json_encode($j['policy'] ?? null));
-$r = call('admin', 'admin', ['action' => 'job_save', 'id' => $j['id'], 'name' => 'GFS', 'destination_id' => 'dest_local', 'schedule_type' => 'daily', 'schedule_time' => '02:00', 'keep_daily' => '14', 'keep_weekly' => '8', 'keep_monthly' => '12', 'keep_last' => '0', 'csrf' => $ac]);
+ok($j && $j['policy'] === ['last' => 0, 'daily' => 7, 'weekly' => 4, 'monthly' => 3, 'hours' => 24] && !isset($j['retention']), 'lịch mới mặc định 7 ngày/4 tuần/3 tháng: ' . json_encode($j['policy'] ?? null));
+$r = call('admin', 'admin', ['action' => 'job_save', 'id' => $j['id'], 'name' => 'GFS', 'destination_id' => 'dest_local', 'schedule_type' => 'daily', 'schedule_time' => '02:00', 'keep_daily' => '14', 'keep_weekly' => '8', 'keep_monthly' => '12', 'keep_last' => '0', 'keep_hours' => '0', 'csrf' => $ac]);
 $j = $findJob($r, 'GFS');
-ok($j['policy'] === ['last' => 0, 'daily' => 14, 'weekly' => 8, 'monthly' => 12], 'lưu chính sách tùy chỉnh');
+ok($j['policy'] === ['last' => 0, 'daily' => 14, 'weekly' => 8, 'monthly' => 12, 'hours' => 0], 'lưu chính sách tùy chỉnh');
 $r = call('admin', 'admin', ['action' => 'job_save', 'id' => $j['id'], 'name' => 'GFS 2', 'destination_id' => 'dest_local', 'schedule_type' => 'daily', 'schedule_time' => '03:00', 'csrf' => $ac]);
 ok(($findJob($r, 'GFS 2')['policy']['daily'] ?? 0) === 14, 'sửa lịch không gửi chính sách thì giữ nguyên');
 $r = call('admin', 'admin', ['action' => 'job_save', 'id' => $j['id'], 'name' => 'GFS', 'destination_id' => 'dest_local', 'schedule_type' => 'daily', 'schedule_time' => '02:00', 'keep_daily' => '999', 'keep_weekly' => '-3', 'csrf' => $ac]);
@@ -73,7 +73,7 @@ for ($i = 0; $i < 3; $i++) {
     WNBEngine::worker();
 }
 $mine = array_values(array_filter(WNBStorage::read('backups'), fn($b) => $b['job_id'] === $j['id']));
-ok(count($mine) === 1, 'cùng ngày chỉ giữ 1 bản "ngày": ' . count($mine));
+ok(count($mine) === 1, 'keep_hours = 0: cùng ngày chỉ giữ 1 bản "ngày": ' . count($mine));
 $st = call('admin', 'admin', ['action' => 'state'])['data'];
 $tagged = null;
 foreach ($st['backups'] as $b) {

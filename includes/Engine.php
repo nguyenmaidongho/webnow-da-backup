@@ -984,9 +984,12 @@ final class WNBEngine
         return ($b['username'] ?? '') . '|' . ($b['destination_id'] ?? '') . '|' . $type . '|' . ($type === 'snapshot' ? '' : (string)($b['job_id'] ?? ''));
     }
 
+    /** Mặc định: mọi bản của lịch trong 24 giờ gần nhất đều được giữ (chạy lại trong ngày không thay bản trước). */
+    public const DEFAULT_KEEP_HOURS = 24;
+
     /**
-     * Chính sách giữ bản của lịch: last (N bản mới nhất), daily/weekly/monthly (bản cuối của mỗi ngày/tuần/tháng).
-     * Lịch cũ chỉ có 'retention' = giữ N bản mới nhất như trước.
+     * Chính sách giữ bản của lịch: last (N bản mới nhất), daily/weekly/monthly (bản cuối của mỗi ngày/tuần/tháng),
+     * hours (giữ MỌI bản trong N giờ gần nhất). Lịch cũ chỉ có 'retention' = giữ N bản mới nhất như trước.
      */
     public static function jobPolicy(array $job): array
     {
@@ -1002,6 +1005,8 @@ final class WNBEngine
         if (array_sum($p) === 0) {
             $p['last'] = 1;
         }
+        // Lịch kiểu cũ (chỉ "N bản mới nhất") giữ nguyên cách cũ: không cộng thêm khoảng giờ.
+        $p['hours'] = array_key_exists('keep_hours', $job) ? max(0, min(168, (int)$job['keep_hours'])) : ($has ? self::DEFAULT_KEEP_HOURS : 0);
         return $p;
     }
 
@@ -1022,12 +1027,21 @@ final class WNBEngine
     }
 
     /**
-     * Chọn bản giữ lại (giống restic forget --keep-*): $list xếp mới -> cũ. Trả về [id => ['last'|'daily'|'weekly'|'monthly', ...]].
-     * Bản mới nhất luôn được giữ.
+     * Chọn bản giữ lại (giống restic forget --keep-* --keep-within): $list xếp mới -> cũ.
+     * Trả về [id => ['recent'|'last'|'daily'|'weekly'|'monthly', ...]]. Bản mới nhất luôn được giữ.
      */
-    public static function retentionKeep(array $list, array $policy): array
+    public static function retentionKeep(array $list, array $policy, ?int $now = null): array
     {
         $keep = [];
+        $hours = max(0, (int)($policy['hours'] ?? 0));
+        if ($hours > 0) {
+            $since = ($now ?? time()) - $hours * 3600;
+            foreach ($list as $b) {
+                if ((strtotime((string)$b['created_at']) ?: 0) >= $since) {
+                    $keep[$b['id']][] = 'recent';
+                }
+            }
+        }
         foreach (array_slice($list, 0, max(0, (int)($policy['last'] ?? 0))) as $b) {
             $keep[$b['id']][] = 'last';
         }

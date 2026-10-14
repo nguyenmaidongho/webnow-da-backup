@@ -66,3 +66,37 @@ foreach ($r['data']['state']['jobs'] ?? [] as $j) {
 }
 ok($ej && $ej['filter_mode'] === 'exclude' && $ej['include_users'] === [] && $ej['include_resellers'] === [] && $ej['exclude_users'] === ['admin'] && $ej['target_count'] === 3, 'đổi sang exclude: ' . json_encode($ej));
 call('admin', 'admin', ['action' => 'job_delete', 'id' => $ij['id'], 'csrf' => $ac]);
+
+// Giữ mọi bản trong N giờ gần nhất: chạy lịch 2 lần trong ngày không thay bản trước
+$now = strtotime('2026-10-14 12:00:00');
+$day = [
+    ['id' => 'b3', 'created_at' => '2026-10-14 11:30:00'],
+    ['id' => 'b2', 'created_at' => '2026-10-14 02:30:00'],
+    ['id' => 'b1', 'created_at' => '2026-10-14 02:00:00'],
+    ['id' => 'b0', 'created_at' => '2026-10-13 02:00:00'],
+    ['id' => 'a9', 'created_at' => '2026-10-12 23:00:00'],
+    ['id' => 'a8', 'created_at' => '2026-10-12 02:00:00'],
+];
+$k = WNBEngine::retentionKeep($day, ['daily' => 7, 'hours' => 24], $now);
+ok(isset($k['b3'], $k['b2'], $k['b1'], $k['b0'], $k['a9']) && !isset($k['a8']), 'giữ mọi bản 24 giờ + bản cuối mỗi ngày: ' . json_encode(array_keys($k)));
+ok($k['b1'] === ['recent'] && in_array('daily', $k['b3'], true), 'bản chỉ giữ vì còn mới có nhãn recent');
+$k = WNBEngine::retentionKeep($day, ['daily' => 7, 'hours' => 0], $now);
+ok(!isset($k['b2']) && !isset($k['b1']) && isset($k['b3']), 'hours = 0: như trước, chỉ bản cuối mỗi ngày');
+ok(WNBEngine::jobPolicy(['keep_daily' => 7])['hours'] === 24, 'lịch cũ không có keep_hours: mặc định 24 giờ');
+ok(WNBEngine::jobPolicy(['keep_daily' => 7, 'keep_hours' => 999])['hours'] === 168, 'keep_hours tối đa 168');
+$r = call('admin', 'admin', ['action' => 'job_save', 'name' => 'Giờ', 'destination_id' => 'dest_local', 'schedule_type' => 'hourly', 'interval_hours' => '6', 'schedule_time' => '00:00', 'keep_hours' => '48', 'keep_daily' => '7', 'keep_weekly' => '0', 'keep_monthly' => '0', 'keep_last' => '0', 'csrf' => $ac]);
+$hj = null;
+foreach ($r['data']['state']['jobs'] ?? [] as $j) {
+    if ($j['name'] === 'Giờ') {
+        $hj = $j;
+    }
+}
+ok($hj && $hj['keep_hours'] === 48 && $hj['policy']['hours'] === 48, 'lưu keep_hours: ' . json_encode($hj['policy'] ?? null));
+$r = call('admin', 'admin', ['action' => 'job_save', 'id' => $hj['id'], 'name' => 'Giờ', 'destination_id' => 'dest_local', 'schedule_type' => 'hourly', 'interval_hours' => '6', 'schedule_time' => '00:00', 'keep_hours' => '0', 'keep_daily' => '0', 'keep_weekly' => '0', 'keep_monthly' => '0', 'keep_last' => '0', 'csrf' => $ac]);
+foreach ($r['data']['state']['jobs'] ?? [] as $j) {
+    if ($j['id'] === $hj['id']) {
+        $hj = $j;
+    }
+}
+ok($hj['policy']['last'] === 1 && $hj['policy']['hours'] === 0, 'để trống hết vẫn giữ ít nhất 1 bản');
+call('admin', 'admin', ['action' => 'job_delete', 'id' => $hj['id'], 'csrf' => $ac]);

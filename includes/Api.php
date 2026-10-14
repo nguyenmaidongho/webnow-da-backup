@@ -802,9 +802,12 @@ final class WNBApi
                 $job[$k] = max(0, min(365, (int)($p[$k] ?? 0)));
             }
         } elseif (isset($p['retention'])) {
-            $job = array_merge($job, ['keep_last' => max(1, min(365, (int)$p['retention'])), 'keep_daily' => 0, 'keep_weekly' => 0, 'keep_monthly' => 0]);
+            $job = array_merge($job, ['keep_last' => max(1, min(365, (int)$p['retention'])), 'keep_daily' => 0, 'keep_weekly' => 0, 'keep_monthly' => 0, 'keep_hours' => 0]);
         } elseif (!$existing) {
             $job = array_merge($job, self::DEFAULT_KEEP);
+        }
+        if (isset($p['keep_hours'])) {
+            $job['keep_hours'] = max(0, min(168, (int)$p['keep_hours']));
         }
         $policy = WNBEngine::jobPolicy($job);
         foreach ($policy as $k => $v) {

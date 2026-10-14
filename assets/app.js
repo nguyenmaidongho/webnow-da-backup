@@ -405,12 +405,15 @@
     function keepBadges(b) {
         if (!b.job_id || !b.keep) return '';
         var names = { daily: t('Ngày'), weekly: t('Tuần'), monthly: t('Tháng') };
+        // Bản chỉ được giữ vì còn mới: báo cho biết sẽ tự xóa khi quá hạn
+        if (b.keep.length === 1 && b.keep[0] === 'recent') return ' <span class="badge" title="' + esc(t('Giữ vì nằm trong khoảng giờ gần nhất của lịch, sau đó tự xóa nếu không thuộc quy tắc ngày/tuần/tháng')) + '">' + esc(t('Gần đây')) + '</span>';
         return b.keep.filter(function (k) { return names[k]; }).map(function (k) { return ' <span class="badge info" title="' + esc(t('Được giữ theo chính sách của lịch')) + '">' + esc(names[k]) + '</span>'; }).join('');
     }
     /** "7 ngày · 4 tuần · 3 tháng" */
     function policyText(p) {
         if (!p) return '';
         var parts = [];
+        if (p.hours) parts.push(t('mọi bản {n} giờ qua', { n: p.hours }));
         if (p.last) parts.push(t('{n} bản mới nhất', { n: p.last }));
         if (p.daily) parts.push(t('{n} ngày', { n: p.daily }));
         if (p.weekly) parts.push(t('{n} tuần', { n: p.weekly }));
@@ -727,7 +730,7 @@
     }
 
     function jobForm(job) {
-        var j = job || { name: '', destination_id: 'dest_local', schedule_type: 'daily', schedule_time: '02:00', schedule_weekday: 0, interval_hours: 6, keep_last: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 3, filter_mode: 'exclude', exclude_users: [], exclude_resellers: [], include_users: [], include_resellers: [], skip_suspended: false, enabled: true };
+        var j = job || { name: '', destination_id: 'dest_local', schedule_type: 'daily', schedule_time: '02:00', schedule_weekday: 0, interval_hours: 6, keep_hours: 24, keep_last: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 3, filter_mode: 'exclude', exclude_users: [], exclude_resellers: [], include_users: [], include_resellers: [], skip_suspended: false, enabled: true };
         var globalEx = S.settings.exclude_accounts || [];
         var globalRs = S.settings.exclude_resellers || [];
         var globalCovered = resellerExcludeMap(globalRs);
@@ -739,9 +742,9 @@
             '<div class="field full"><label>' + esc(t('Tên lịch')) + '</label><input class="input" name="name" maxlength="60" required value="' + esc(nameOf(j.name)) + '" placeholder="' + esc(t('Ví dụ: Hằng đêm lên Cloudflare R2')) + '"></div>' +
             '<div class="field full"><label>' + esc(t('Kho lưu trữ')) + '</label><select class="select" name="destination_id">' + S.destinations.map(function (d) { return '<option value="' + esc(d.id) + '"' + (d.id === j.destination_id ? ' selected' : '') + '>' + esc(nameOf(d.name)) + '</option>'; }).join('') + '</select></div>' +
             '<div class="field full"><label>' + esc(t('Giữ bản sao lưu')) + '</label><div class="keep-grid">' +
-            [['keep_daily', t('Hằng ngày'), t('ngày gần nhất')], ['keep_weekly', t('Hằng tuần'), t('tuần gần nhất')], ['keep_monthly', t('Hằng tháng'), t('tháng gần nhất')], ['keep_last', t('Mới nhất'), t('bản bất kỳ')]].map(function (f) {
+            [['keep_hours', t('Mọi bản trong'), t('giờ gần nhất'), 168], ['keep_daily', t('Hằng ngày'), t('ngày gần nhất')], ['keep_weekly', t('Hằng tuần'), t('tuần gần nhất')], ['keep_monthly', t('Hằng tháng'), t('tháng gần nhất')], ['keep_last', t('Mới nhất'), t('bản bất kỳ')]].map(function (f) {
                 var v = (j.policy && j.policy[f[0].slice(5)] !== undefined) ? j.policy[f[0].slice(5)] : j[f[0]];
-                return '<label class="keep-box"><span class="keep-title">' + esc(f[1]) + '</span><input class="input" type="number" min="0" max="365" name="' + f[0] + '" value="' + esc(v || 0) + '"><span class="keep-sub">' + esc(f[2]) + '</span></label>';
+                return '<label class="keep-box"><span class="keep-title">' + esc(f[1]) + '</span><input class="input" type="number" min="0" max="' + (f[3] || 365) + '" name="' + f[0] + '" value="' + esc(v || 0) + '"><span class="keep-sub">' + esc(f[2]) + '</span></label>';
             }).join('') + '</div><div class="hint" data-keep-hint></div></div>' +
             '<div class="field"><label>' + esc(t('Tần suất')) + '</label><select class="select" name="schedule_type">' +
             [['daily', t('Hằng ngày')], ['weekly', t('Hằng tuần')], ['hourly', t('Theo số giờ')]].map(function (o) { return '<option value="' + o[0] + '"' + (j.schedule_type === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select></div>' +
@@ -799,9 +802,10 @@
         var keepHint = function () {
             var v = function (n) { return Math.max(0, +form[n].value || 0); };
             var max = v('keep_last') + v('keep_daily') + v('keep_weekly') + v('keep_monthly');
-            form.querySelector('[data-keep-hint]').textContent = max
-                ? t('Mỗi tài khoản giữ tối đa {n} bản: bản cuối của mỗi ngày, mỗi tuần, mỗi tháng (một bản có thể tính cho nhiều mục nên thực tế ít hơn). Bản cũ hơn tự xóa.', { n: max })
-                : t('Phải giữ ít nhất 1 bản.');
+            var hours = v('keep_hours');
+            form.querySelector('[data-keep-hint]').textContent = !max && !hours ? t('Phải giữ ít nhất 1 bản.')
+                : (hours ? t('Mọi bản trong {h} giờ gần nhất đều được giữ, kể cả khi chạy lại nhiều lần trong ngày.', { h: hours }) + ' ' : '') +
+                (max ? t('Bản cũ hơn: giữ bản cuối của mỗi ngày, mỗi tuần, mỗi tháng (tối đa {n} bản, một bản có thể tính cho nhiều mục nên thực tế ít hơn), còn lại tự xóa.', { n: max }) : '');
         };
         form.addEventListener('input', keepHint);
         var sync = function () {
