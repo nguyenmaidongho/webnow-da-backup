@@ -240,6 +240,29 @@ final class WNBEngine
         return false;
     }
 
+    /** Kho đang có tác vụ chờ hoặc đang chạy (sao lưu, khôi phục, tải về, xóa, bảo trì...). */
+    public static function destinationBusy(string $destId): bool
+    {
+        foreach (WNBStorage::read('queue') as $t) {
+            if (($t['destination_id'] ?? '') === $destId && in_array($t['status'], ['pending', 'running'], true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Gỡ khỏi danh sách mọi bản sao lưu của một kho (không chạm vào dữ liệu trên kho). Trả về số bản đã gỡ. */
+    public static function detachDestination(string $destId): int
+    {
+        $n = 0;
+        WNBStorage::update('backups', function ($list) use ($destId, &$n) {
+            $keep = array_values(array_filter($list, fn($b) => ($b['destination_id'] ?? '') !== $destId));
+            $n = count($list) - count($keep);
+            return $keep;
+        });
+        return $n;
+    }
+
     /** Tài khoản đang có tác vụ sao lưu/khôi phục chờ hoặc đang chạy. */
     public static function accountBusy(string $u): bool
     {
@@ -663,12 +686,20 @@ final class WNBEngine
                     }
                 }
             }
-            $code = WNBShell::run($prefix . WNBRestic::cmd($dest, 'backup --json --retry-lock 30m --host ' . escapeshellarg($host) . $tags
-                . ' --tag part:home --tag ' . escapeshellarg('hp:' . $home) . ' --tag ' . escapeshellarg('mp:' . $work)
-                . ($parent ? ' --parent ' . escapeshellarg($parent) : '') . $excludes
-                . ($home !== '' ? ' ' . escapeshellarg($home) : '') . ' ' . escapeshellarg($work), true), $out);
-            $r = WNBRestic::parseJson($out);
-            $snap = (string)($r['summary']['snapshot_id'] ?? '');
+            foreach ($parent ? [$parent, null] : [null] as $try) {
+                $out = [];
+                $code = WNBShell::run($prefix . WNBRestic::cmd($dest, 'backup --json --retry-lock 30m --host ' . escapeshellarg($host) . $tags
+                    . ' --tag part:home --tag ' . escapeshellarg('hp:' . $home) . ' --tag ' . escapeshellarg('mp:' . $work)
+                    . ($try ? ' --parent ' . escapeshellarg($try) : '') . $excludes
+                    . ($home !== '' ? ' ' . escapeshellarg($home) : '') . ' ' . escapeshellarg($work), true), $out);
+                $r = WNBRestic::parseJson($out);
+                $snap = (string)($r['summary']['snapshot_id'] ?? '');
+                // Bản làm mốc không còn trong kho (vd kho vừa đổi vị trí): thử lại một lần không dùng mốc.
+                if ($snap !== '' || !$try || strpos(implode("\n", $out), substr($try, 0, 8)) === false) {
+                    break;
+                }
+            }
+            $parent = $try;
             if ($snap === '' || ($code !== 0 && $code !== 3)) {
                 if (self::outOfSpace($out)) {
                     throw self::diskFullError($staging);
@@ -1854,6 +1885,7 @@ final class WNBEngine
             throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
         }
         self::step($task, 10, 'Đọc danh sách snapshot trong kho {dest}', ['dest' => $dest['name']]);
+        $listedAt = WNB::now();
         $code = WNBShell::run(WNBRestic::cmd($dest, 'snapshots --json --no-lock --tag wnb'), $out);
         $raw = implode("
 ", $out);
@@ -1878,6 +1910,7 @@ final class WNBEngine
                 }
             }
         }
+        $removed = self::dropMissingSnapshots($dest['id'], array_column($snaps, 'id'), $listedAt);
         if ($records) {
             WNBStorage::update('backups', function ($list) use ($records) {
                 $list = array_merge($list, $records);
@@ -1885,7 +1918,30 @@ final class WNBEngine
                 return $list;
             });
         }
+        if ($removed) {
+            return ['message' => WNBLang::msg('Đã nạp {n} bản sao lưu từ kho {dest}, gỡ {removed} bản không còn trong kho.', ['n' => count($records), 'dest' => $dest['name'], 'removed' => $removed]), 'warnings' => []];
+        }
         return ['message' => WNBLang::msg('Đã nạp {n} bản sao lưu từ kho {dest}.', ['n' => count($records), 'dest' => $dest['name']]), 'warnings' => []];
+    }
+
+    /**
+     * Gỡ khỏi danh sách các bản restic của kho mà snapshot home không còn trong kho (bị xóa ngoài plugin, kho đổi vị trí...).
+     * Chỉ xét bản tạo trước lúc đọc danh sách snapshot và không có tác vụ đang dùng. Trả về số bản đã gỡ.
+     */
+    public static function dropMissingSnapshots(string $destId, array $snapshotIds, string $before): int
+    {
+        $have = array_fill_keys(array_map('strval', $snapshotIds), true);
+        $gone = [];
+        foreach (WNBStorage::read('backups') as $b) {
+            if (($b['destination_id'] ?? '') === $destId && ($b['format'] ?? '') === 'restic' && !empty($b['restic']['home'])
+                && !isset($have[(string)$b['restic']['home']]) && strcmp((string)$b['created_at'], $before) < 0 && !self::backupBusy($b['id'])) {
+                $gone[] = $b['id'];
+            }
+        }
+        if ($gone) {
+            WNBStorage::update('backups', fn($list) => array_values(array_filter($list, fn($b) => !in_array($b['id'], $gone, true))));
+        }
+        return count($gone);
     }
 
     /* ============================== Lịch tự động ============================== */

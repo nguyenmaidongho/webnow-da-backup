@@ -795,7 +795,9 @@
                 var box = m.el.querySelector('[data-job-preview] .grow');
                 api('job_preview', collect()).then(function (r) {
                     var n = r.users.length;
-                    box.innerHTML = n ? '<b>' + esc(t('{n} tài khoản sẽ được sao lưu', { n: n })) + '</b> <span class="muted small">' + esc(r.users.slice(0, 12).join(', ') + (n > 12 ? ', …' : '')) + '</span>' : '<span class="badge warn">' + esc(t('Không có tài khoản nào được sao lưu')) + '</span>';
+                    var size = {}; S.accounts.forEach(function (a) { size[a.username] = +a.usage_mb || 0; });
+                    var mb = r.users.reduce(function (s, u) { return s + (size[u] || 0); }, 0);
+                    box.innerHTML = n ? '<b>' + esc(t('{n} tài khoản sẽ được sao lưu', { n: n })) + '</b> <span class="badge info" title="' + esc(t('Tổng dung lượng đang dùng của các tài khoản (home, database, email), trước khi nén. Kho Incremental chỉ tải toàn bộ ở lần đầu, các lần sau chỉ phần thay đổi.')) + '">' + esc(t('~{size} dữ liệu', { size: fmtMb(mb) })) + '</span> <span class="muted small">' + esc(r.users.slice(0, 12).join(', ') + (n > 12 ? ', …' : '')) + '</span>' : '<span class="badge warn">' + esc(t('Không có tài khoản nào được sao lưu')) + '</span>';
                 }, function (err) { box.textContent = err.message; });
             }, 250);
         };
@@ -909,7 +911,8 @@
             '<div class="field"><label>' + esc(t('Loại kho')) + '</label><select class="select" name="type"' + (dest ? ' disabled' : '') + '>' + typeOpts + '</select></div>' +
             '<div class="field full" data-kind="local"><label>' + esc(t('Thư mục trên máy chủ')) + '</label><input class="input mono" name="path" value="' + esc(d.path || '') + '" placeholder="/backup/webnowbackup"><div class="hint">' + esc(t('Nên dùng ổ đĩa riêng. Không được nằm trong thư mục home của khách.')) + '</div></div>' +
             '<div data-kind="remote" class="full form-grid" style="grid-column:1/-1"></div>' +
-            '<div class="field full" data-kind="remote"><label>' + esc(t('Bucket / thư mục đích')) + '</label><input class="input mono" name="subpath" value="' + esc(d.subpath || '') + '" placeholder="' + esc(t('ten-bucket/server1')) + '"></div>' +
+            '<div class="field full" data-kind="remote"><label>' + esc(t('Bucket / thư mục đích')) + '</label><input class="input mono" name="subpath" value="' + esc(d.subpath || '') + '" placeholder="' + esc(t('ten-bucket/server1')) + '">' +
+            (dest ? '<div class="hint">' + esc(t('Đổi bucket, endpoint hoặc máy chủ = chuyển sang kho khác: danh sách bản sao lưu ở vị trí cũ được gỡ khỏi plugin (dữ liệu ở vị trí cũ không bị xóa). Chỉ đổi khóa truy cập thì giữ nguyên.')) + '</div>' : '') + '</div>' +
             '<div class="field full" data-kind="remote"><label>' + esc(t('Cách lưu trên cloud')) + '</label><select class="select" name="format">' +
             '<option value="restic"' + (d.format === 'restic' ? ' selected' : '') + (S.engine.restic ? '' : ' disabled') + '>' + esc(t('Incremental (restic), khuyên dùng: chỉ tải phần thay đổi')) + (S.engine.restic ? '' : ' (' + esc(t('chưa cài restic')) + ')') + '</option>' +
             '<option value="archive"' + (d.format === 'archive' ? ' selected' : '') + '>' + esc(t('Nén: mỗi lần một bản đầy đủ, không cần chỗ trống trên máy chủ')) + '</option>' +

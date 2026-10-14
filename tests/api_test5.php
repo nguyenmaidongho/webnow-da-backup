@@ -100,3 +100,41 @@ foreach ($r['data']['state']['jobs'] ?? [] as $j) {
 }
 ok($hj['policy']['last'] === 1 && $hj['policy']['hours'] === 0, 'để trống hết vẫn giữ ít nhất 1 bản');
 call('admin', 'admin', ['action' => 'job_delete', 'id' => $hj['id'], 'csrf' => $ac]);
+
+// Đổi kho S3 sang vị trí khác: gỡ danh sách bản của vị trí cũ; chỉ đổi khóa thì giữ
+$s3 = fn(array $x) => call('admin', 'admin', array_merge(['action' => 'dest_save', 'name' => 'S3 đổi', 'type' => 's3', 'subpath' => 'bk-old/srv', 'format' => 'restic', 'p_provider' => 'Other', 'p_region' => '', 'p_access_key_id' => 'AK1', 'p_secret_access_key' => 'SK1', 'p_endpoint' => 'https://s3.old.vn', 'csrf' => $ac], $x));
+$r = $s3([]);
+ok($r['ok'], 'lưu kho S3 restic: ' . ($r['error'] ?? ''));
+$sd = null;
+foreach (WNBStorage::read('destinations') as $d) {
+    if ($d['name'] === 'S3 đổi') {
+        $sd = $d;
+    }
+}
+ok($sd && strlen($sd['location'] ?? '') === 40, 'kho cloud lưu dấu vết vị trí');
+$fake = function ($id, $snap, $at = '2026-10-14 22:15:00') use ($sd) {
+    return ['id' => $id, 'username' => 'shopgiay', 'reseller' => 'reseller_vn', 'owner_key' => 'reseller_vn', 'type' => 'backup', 'job_id' => '', 'destination_id' => $sd['id'], 'format' => 'restic', 'created_at' => $at, 'size_mb' => 1, 'restic' => ['home' => $snap, 'dbs' => [], 'home_path' => '/home/shopgiay', 'meta_path' => '/x', 'host' => 'h']];
+};
+WNBStorage::update('backups', fn($l) => array_merge([$fake('bkp_old1', str_repeat('a', 64)), $fake('bkp_old2', str_repeat('b', 64))], $l));
+$countDest = fn() => count(array_filter(WNBStorage::read('backups'), fn($b) => $b['destination_id'] === $sd['id']));
+$r = $s3(['id' => $sd['id'], 'p_access_key_id' => 'AK2', 'p_secret_access_key' => 'SK2', 'p_endpoint' => 'S3.OLD.VN/']);
+ok($r['ok'] && $countDest() === 2, 'chỉ đổi khóa (endpoint viết khác kiểu) không gỡ bản: ' . ($r['error'] ?? $countDest()));
+WNBStorage::update('queue', fn($l) => array_merge([['id' => 'task_busy', 'type' => 'backup', 'username' => 'shopgiay', 'status' => 'pending', 'destination_id' => $sd['id'], 'created_at' => WNB::now()]], $l));
+$r = $s3(['id' => $sd['id'], 'p_endpoint' => 'https://s3.new.vn']);
+ok(!$r['ok'] && $countDest() === 2, 'đang có tác vụ thì không cho đổi vị trí');
+ok((WNBRclone::readRemote($sd['remote'])['endpoint'] ?? '') === 'S3.OLD.VN/', 'bị từ chối thì không ghi đè cấu hình rclone');
+WNBStorage::update('queue', fn($l) => array_values(array_filter($l, fn($t) => $t['id'] !== 'task_busy')));
+$r = $s3(['id' => $sd['id'], 'p_endpoint' => 'https://s3.new.vn']);
+ok($r['ok'] && $countDest() === 0 && strpos($r['data']['message'] ?? '', 'gỡ 2 bản') !== false, 'đổi endpoint: gỡ 2 bản của vị trí cũ: ' . ($r['data']['message'] ?? $r['error'] ?? ''));
+WNBStorage::update('backups', fn($l) => array_merge([$fake('bkp_x', str_repeat('c', 64))], $l));
+$r = $s3(['id' => $sd['id'], 'p_endpoint' => 'https://s3.new.vn', 'subpath' => 'bk-new/srv']);
+ok($r['ok'] && $countDest() === 0, 'đổi bucket cũng là đổi vị trí');
+
+// Quét lại kho: gỡ bản mà snapshot không còn trong kho (chỉ bản cũ hơn lúc đọc danh sách)
+WNBStorage::update('backups', fn($l) => array_merge([$fake('bkp_keep', str_repeat('d', 64)), $fake('bkp_gone', str_repeat('e', 64)), $fake('bkp_late', str_repeat('f', 64), '2026-10-15 09:00:00')], $l));
+$n = WNBEngine::dropMissingSnapshots($sd['id'], [str_repeat('d', 64)], '2026-10-15 08:00:00');
+$ids = array_column(array_filter(WNBStorage::read('backups'), fn($b) => $b['destination_id'] === $sd['id']), 'id');
+sort($ids);
+ok($n === 1 && $ids === ['bkp_keep', 'bkp_late'], 'quét lại kho gỡ bản không còn trong kho: ' . json_encode($ids));
+WNBStorage::update('backups', fn($l) => array_values(array_filter($l, fn($b) => $b['destination_id'] !== $sd['id'])));
+call('admin', 'admin', ['action' => 'dest_delete', 'id' => $sd['id'], 'csrf' => $ac]);

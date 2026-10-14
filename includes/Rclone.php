@@ -95,6 +95,15 @@ final class WNBRclone
     /** Ghi/ghi đè một remote trong rclone.conf. Trường bí mật để trống = giữ giá trị cũ. */
     public static function saveRemote(string $name, string $kind, array $input): void
     {
+        $params = self::buildParams($name, $kind, $input);
+        $sections = self::parseConfig();
+        $sections[$name] = ['type' => self::TYPES[$kind]['type']] + $params;
+        self::writeConfig($sections);
+    }
+
+    /** Tham số remote sẽ ghi vào rclone.conf từ dữ liệu form (chưa ghi). */
+    public static function buildParams(string $name, string $kind, array $input): array
+    {
         if (!isset(self::TYPES[$kind]) || !preg_match('/^[a-z0-9_\-]{1,40}$/i', $name)) {
             throw new WNBError('Loại kho hoặc tên remote không hợp lệ.');
         }
@@ -121,10 +130,28 @@ final class WNBRclone
         if ($kind === 's3' && empty($params['provider'])) {
             $params['provider'] = 'Other';
         }
+        return $params;
+    }
 
-        $sections = self::parseConfig();
-        $sections[$name] = ['type' => self::TYPES[$kind]['type']] + $params;
-        self::writeConfig($sections);
+    /** Trường xác định VỊ TRÍ kho (không gồm khóa bí mật, nên đổi khóa truy cập không bị coi là đổi kho). */
+    public const LOCATION_FIELDS = [
+        's3' => ['provider', 'region', 'endpoint'], 'r2' => ['endpoint'], 'b2' => ['account'],
+        'sftp' => ['host', 'port', 'user'], 'ftp' => ['host', 'port', 'user'], 'webdav' => ['url', 'user'],
+        'drive' => [], 'onedrive' => ['drive_id'],
+    ];
+
+    /**
+     * Dấu vết vị trí của kho cloud: loại + bucket/thư mục + endpoint/host... Đổi dấu vết = trỏ sang kho khác,
+     * các bản sao lưu đã ghi trong danh sách không còn nằm ở đó nữa.
+     */
+    public static function locationKey(string $type, string $subpath, array $params): string
+    {
+        $parts = [$type, trim($subpath, '/')];
+        foreach (self::LOCATION_FIELDS[$type] ?? [] as $f) {
+            $v = strtolower(rtrim(trim((string)($params[$f] ?? '')), '/'));
+            $parts[] = $f === 'endpoint' ? preg_replace('#^https?://#', '', $v) : $v;
+        }
+        return sha1(implode("\n", $parts));
     }
 
     public static function deleteRemote(string $name): void

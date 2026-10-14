@@ -655,6 +655,14 @@ final class WNBApi
             foreach (WNBRclone::TYPES[$type]['fields'] as $f) {
                 $input[$f] = (string)($p['p_' . $f] ?? '');
             }
+            $rec['location'] = WNBRclone::locationKey($type, $sub, WNBRclone::buildParams($rec['remote'], $type, $input));
+            if ($existing) {
+                $old = $existing['location'] ?? WNBRclone::locationKey($type, (string)($existing['subpath'] ?? ''), WNBRclone::readRemote($rec['remote']));
+                $moved = $old !== $rec['location'];
+                if ($moved && WNBEngine::destinationBusy($id)) {
+                    throw new WNBError('Kho đang có tác vụ chờ hoặc đang chạy. Đợi xong rồi hãy đổi sang vị trí khác.');
+                }
+            }
             WNBRclone::saveRemote($rec['remote'], $type, $input);
         }
 
@@ -664,6 +672,9 @@ final class WNBApi
         $newKey = false;
         if (($rec['format'] ?? '') === 'restic') {
             $newKey = self::setupRestic($rec, trim((string)($p['restic_password'] ?? '')), $test['ok']);
+        }
+        if (!empty($moved)) {
+            unset($rec['restic_maint']); // trạng thái bảo trì là của kho cũ
         }
         WNBStorage::update('destinations', function ($l) use ($rec) {
             foreach ($l as &$d) {
@@ -675,6 +686,16 @@ final class WNBApi
             $l[] = $rec;
             return $l;
         });
+        if (!empty($moved)) {
+            // Bản sao lưu cũ vẫn nằm nguyên ở vị trí cũ, chỉ gỡ khỏi danh sách vì kho này không còn trỏ tới đó.
+            $removed = WNBEngine::detachDestination($rec['id']);
+            if (($rec['format'] ?? '') === 'restic' && $test['ok']) {
+                // Kho restic ở vị trí mới có thể đã có bản sao lưu (vd kết nối lại kho cũ): nạp vào danh sách.
+                WNBEngine::enqueue(['type' => 'rescan', 'username' => '', 'initiated_by' => 'admin', 'role' => 'admin', 'destination_id' => $rec['id']]);
+                WNBEngine::kick();
+            }
+            return ['Đã lưu kho "{name}" ở vị trí mới, gỡ {n} bản sao lưu của vị trí cũ khỏi danh sách (dữ liệu ở vị trí cũ không bị xóa). {detail}', ['name' => $name, 'n' => $removed, 'detail' => $test['message']], $test['ok'], $newKey];
+        }
         return ['Đã lưu kho "{name}". {detail}', ['name' => $name, 'detail' => $test['message']], $test['ok'], $newKey];
     }
 
