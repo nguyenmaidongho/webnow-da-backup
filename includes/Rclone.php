@@ -646,11 +646,22 @@ final class WNBRestic
         return $items;
     }
 
-    /** Các snapshot của một bản sao lưu (home + từng database). */
+    /** Các snapshot của một bản sao lưu (home + database; một snapshot có thể chứa cả lô database). */
     public static function snapshotIds(array $b): array
     {
         $r = (array)($b['restic'] ?? []);
-        return array_values(array_filter(array_merge([(string)($r['home'] ?? '')], array_map('strval', array_values((array)($r['dbs'] ?? [])))), fn($id) => (bool)preg_match('/^[0-9a-f]{8,64}$/', $id)));
+        return array_values(array_unique(array_filter(array_merge([(string)($r['home'] ?? '')], array_map('strval', array_values((array)($r['dbs'] ?? [])))), fn($id) => (bool)preg_match('/^[0-9a-f]{8,64}$/', $id))));
+    }
+
+    /**
+     * Đường dẫn file dump của database trong snapshot: database lưu theo lô nằm ở <thư mục lô>/<db>.sql,
+     * database dump thẳng (và bản cũ) là /<db>.sql.
+     */
+    public static function dbFile(array $r, string $db): string
+    {
+        $f = (string)($r['db_files'][$db] ?? '');
+        $tail = '/' . $db . '.sql';
+        return $f !== '' && $f[0] === '/' && strpos($f, '..') === false && substr($f, -strlen($tail)) === $tail ? $f : $tail;
     }
 
     public static function forget(array $dest, array $ids): void
@@ -666,7 +677,8 @@ final class WNBRestic
 
     /**
      * Dựng lại bản ghi catalog từ snapshot trong kho (khi mất dữ liệu plugin, cài lại máy chủ).
-     * Mỗi bản sao lưu gồm snapshot home (tag part:home) và các snapshot database (tag db:<tên>), chung tag b:<id>.
+     * Mỗi bản sao lưu gồm snapshot home (tag part:home) và các snapshot database (tag db:<tên>; snapshot một lô database
+     * có part:db, dp:<thư mục lô> và một tag db: cho mỗi database), chung tag b:<id>.
      */
     public static function recordsFromSnapshots(array $snaps, array $dest, array $knownIds): array
     {
@@ -685,10 +697,17 @@ final class WNBRestic
             if (!isset($t['wnb']) || !preg_match('/^(bkp|snap)_[A-Za-z0-9_\-]+$/', $bid) || isset($known[$bid])) {
                 continue;
             }
-            $g = $groups[$bid] ?? ['u' => $t['u'][0] ?? '', 't' => $t['t'][0] ?? 'backup', 'j' => $t['j'][0] ?? '', 'dbs' => [], 'home' => null];
+            $g = $groups[$bid] ?? ['u' => $t['u'][0] ?? '', 't' => $t['t'][0] ?? 'backup', 'j' => $t['j'][0] ?? '', 'dbs' => [], 'db_files' => [], 'home' => null];
             $id = (string)($s['id'] ?? '');
             if (isset($t['db'])) {
-                $g['dbs'][$t['db'][0]] = $id;
+                // Snapshot một lô (part:db, dp:<thư mục lô>) mang tag db:<tên> cho từng database trong lô.
+                $dir = in_array('db', $t['part'] ?? [], true) ? rtrim((string)($t['dp'][0] ?? ''), '/') : '';
+                foreach ($t['db'] as $db) {
+                    $g['dbs'][$db] = $id;
+                    if ($dir !== '') {
+                        $g['db_files'][$db] = $dir . '/' . $db . '.sql';
+                    }
+                }
             } elseif (in_array('home', $t['part'] ?? [], true)) {
                 $g['home'] = ['id' => $id, 'hp' => $t['hp'][0] ?? '', 'mp' => $t['mp'][0] ?? '', 'time' => self::time((string)($s['time'] ?? '')), 'host' => (string)($s['hostname'] ?? '')];
             }
@@ -725,7 +744,7 @@ final class WNBRestic
                 'imported' => true,
                 'created_at' => $g['home']['time'],
                 'storage_path' => self::repo($dest),
-                'restic' => ['home' => $g['home']['id'], 'dbs' => $g['dbs'], 'home_path' => $g['home']['hp'], 'meta_path' => $g['home']['mp'], 'host' => $g['home']['host']],
+                'restic' => ['home' => $g['home']['id'], 'dbs' => $g['dbs'], 'db_files' => $g['db_files'], 'home_path' => $g['home']['hp'], 'meta_path' => $g['home']['mp'], 'host' => $g['home']['host']],
             ];
         }
         return $records;

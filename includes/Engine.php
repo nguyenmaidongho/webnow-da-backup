@@ -613,35 +613,42 @@ final class WNBEngine
             // 3. Database
             $dumped = [];
             if (!empty($acc['databases'])) {
-                self::step($task, 15, 'Dump {n} database', ['n' => count($acc['databases'])]);
+                $n = count($acc['databases']);
+                self::step($task, 15, 'Dump {n} database', ['n' => $n]);
                 $mysqldump = WNBShell::which('mysqldump');
                 try {
                     $cnf = WNBDirectAdmin::mysqlDefaultsFile();
+                    $jobs = [];
                     foreach ($acc['databases'] as $db) {
-                        $file = $work . '/databases/' . $db . '.sql.gz';
                         $dump = sprintf(
-                            '%s%s --defaults-extra-file=%s --single-transaction --quick --routines --triggers --events --max-allowed-packet=1G %s | %s',
+                            '%s%s --defaults-extra-file=%s%s %s | %s',
                             $prefix,
                             escapeshellarg($mysqldump ?: 'mysqldump'),
                             escapeshellarg($cnf),
+                            self::DUMP_FLAGS,
                             escapeshellarg($db),
                             $prefix . self::compressor()
                         );
                         // Bản nén: dump đi thẳng lên cloud, không ghi ra đĩa local.
-                        $code = WNBShell::bash($dump . ' | ' . ($archive
+                        $jobs[$db] = $dump . ' | ' . ($archive
                             ? WNBRclone::cmd('rcat ' . escapeshellarg(WNBRclone::join($remote, 'databases', $db . '.sql.gz')) . self::STREAM_FLAGS, true)
-                            : 'cat > ' . escapeshellarg($file)), $out);
+                            : 'cat > ' . escapeshellarg($work . '/databases/' . $db . '.sql.gz'));
+                    }
+                    $full = false;
+                    foreach (self::runDbJobs($jobs, fn(int $done) => self::dbProgress($task, $done, $n)) as $db => [$code, $out]) {
                         if ($code === 0) {
                             $dumped[] = $db;
-                        } elseif (self::outOfSpace($out)) {
-                            throw self::diskFullError($root);
-                        } else {
-                            @unlink($file);
-                            if ($archive) {
-                                WNBShell::run(WNBRclone::cmd('deletefile ' . escapeshellarg(WNBRclone::join($remote, 'databases', $db . '.sql.gz'))));
-                            }
-                            $warnings[] = WNBLang::msg('Dump database {db} thất bại: {detail}', ['db' => $db, 'detail' => WNBShell::tail($out, 2)]);
+                            continue;
                         }
+                        $full = $full || self::outOfSpace($out);
+                        @unlink($work . '/databases/' . $db . '.sql.gz');
+                        if ($archive) {
+                            WNBShell::run(WNBRclone::cmd('deletefile ' . escapeshellarg(WNBRclone::join($remote, 'databases', $db . '.sql.gz'))));
+                        }
+                        $warnings[] = WNBLang::msg('Dump database {db} thất bại: {detail}', ['db' => $db, 'detail' => WNBShell::tail($out, 2)]);
+                    }
+                    if ($full) {
+                        throw self::diskFullError($root);
                     }
                 } catch (WNBError $e) {
                     if ($e->key === self::DISK_FULL || $e instanceof WNBCancelled) {
@@ -821,7 +828,7 @@ final class WNBEngine
         $prefix = WNBShell::lowPriorityPrefix();
         $host = self::hostname();
         $tags = self::resticTags($u, $id, $isSnap, (string)$task['job_id']);
-        $snaps = ['home' => '', 'dbs' => []];
+        $snaps = ['home' => '', 'dbs' => [], 'db_files' => []];
         $bytes = 0;
         $added = 0;
         $dumped = [];
@@ -831,14 +838,73 @@ final class WNBEngine
             self::collectMeta($u, $acc, $work, $warnings);
 
             if (!empty($acc['databases'])) {
-                self::step($task, 15, 'Dump {n} database', ['n' => count($acc['databases'])]);
+                $n = count($acc['databases']);
+                self::step($task, 15, 'Dump {n} database', ['n' => $n]);
                 $mysqldump = WNBShell::which('mysqldump') ?: 'mysqldump';
+                $batchDir = $staging . '/rdb/' . $u;
+                $finished = 0;
                 try {
                     $cnf = WNBDirectAdmin::mysqlDefaultsFile();
-                    foreach ($acc['databases'] as $db) {
+                    $dumpCmd = fn(string $db) => escapeshellarg($mysqldump) . ' --defaults-extra-file=' . escapeshellarg($cnf) . self::DUMP_FLAGS . ' ' . escapeshellarg($db);
+                    [$batches, $single] = self::planDbBatches($acc['databases'], self::databaseSizes($cnf, $u), @disk_free_space($staging));
+                    // Lô: dump song song ra <staging>/rdb/<user>/<db>.sql rồi một snapshot cho cả lô (tag db:<tên> cho từng database).
+                    foreach ($batches as $batch) {
+                        self::rmrf($batchDir);
+                        self::mkdirSecure($staging . '/rdb', 0700);
+                        self::mkdirSecure($batchDir, 0700);
+                        $jobs = [];
+                        foreach ($batch as $db) {
+                            $jobs[$db] = $prefix . $dumpCmd($db) . ' > ' . escapeshellarg($batchDir . '/' . $db . '.sql');
+                        }
+                        $ok = [];
+                        foreach (self::runDbJobs($jobs, fn(int $done) => self::dbProgress($task, $finished + $done, $n)) as $db => [$code, $out]) {
+                            if ($code === 0) {
+                                $ok[] = $db;
+                                continue;
+                            }
+                            @unlink($batchDir . '/' . $db . '.sql');
+                            if (self::outOfSpace($out)) {
+                                $single[] = $db; // hết chỗ giữa chừng: dump thẳng vào restic, không cần đĩa
+                            } else {
+                                $warnings[] = WNBLang::msg('Dump database {db} thất bại: {detail}', ['db' => $db, 'detail' => WNBShell::tail($out, 2)]);
+                            }
+                        }
+                        $finished += count($batch);
+                        if ($ok) {
+                            $out = [];
+                            $code = WNBShell::run($prefix . WNBRestic::cmd($dest, 'backup --json --retry-lock 30m --host ' . escapeshellarg($host) . $tags
+                                . ' --tag part:db --tag ' . escapeshellarg('dp:' . $batchDir)
+                                . implode('', array_map(fn($db) => ' --tag ' . escapeshellarg('db:' . $db), $ok)) . ' ' . escapeshellarg($batchDir), true), $out);
+                            $r = WNBRestic::parseJson($out);
+                            $snap = (string)($r['summary']['snapshot_id'] ?? '');
+                            if ($snap !== '' && ($code === 0 || $code === 3)) {
+                                foreach ($ok as $db) {
+                                    $snaps['dbs'][$db] = $snap;
+                                    $snaps['db_files'][$db] = $batchDir . '/' . $db . '.sql';
+                                    $dumped[] = $db;
+                                }
+                                $bytes += (int)($r['summary']['total_bytes_processed'] ?? 0);
+                                $added += (int)($r['summary']['data_added_packed'] ?? $r['summary']['data_added'] ?? 0);
+                            } else {
+                                if ($snap !== '') {
+                                    WNBRestic::forget($dest, [$snap]);
+                                }
+                                if (self::outOfSpace($out)) {
+                                    throw self::diskFullError($staging);
+                                }
+                                foreach ($ok as $db) {
+                                    $warnings[] = WNBLang::msg('Dump database {db} thất bại: {detail}', ['db' => $db, 'detail' => self::resticDetail($r, $out)]);
+                                }
+                            }
+                        }
+                        self::rmrf($batchDir);
+                    }
+                    // Database lớn (hoặc không biết dung lượng): mysqldump chạy thẳng vào restic, không ghi ra đĩa.
+                    foreach ($single as $db) {
+                        self::dbProgress($task, $finished, $n);
                         $code = WNBShell::run($prefix . WNBRestic::cmd($dest, 'backup --json --retry-lock 30m --host ' . escapeshellarg($host) . $tags
-                            . ' --tag ' . escapeshellarg('db:' . $db) . ' --stdin-from-command --stdin-filename ' . escapeshellarg($db . '.sql') . ' -- '
-                            . escapeshellarg($mysqldump) . ' --defaults-extra-file=' . escapeshellarg($cnf) . ' --single-transaction --quick --routines --triggers --events --max-allowed-packet=1G ' . escapeshellarg($db), true), $out);
+                            . ' --tag ' . escapeshellarg('db:' . $db) . ' --stdin-from-command --stdin-filename ' . escapeshellarg($db . '.sql') . ' -- ' . $dumpCmd($db), true), $out);
+                        $finished++;
                         $r = WNBRestic::parseJson($out);
                         $snap = (string)($r['summary']['snapshot_id'] ?? '');
                         if ($code === 0 && $snap !== '') {
@@ -855,13 +921,21 @@ final class WNBEngine
                     }
                 } catch (WNBCancelled $e) {
                     throw $e;
+                } catch (WNBError $e) {
+                    if ($e->key === self::DISK_FULL) {
+                        throw $e;
+                    }
+                    $warnings[] = WNBLang::msg('Bỏ qua database: {detail}', ['detail' => $e->getMessage()]);
                 } catch (Throwable $e) {
                     $warnings[] = WNBLang::msg('Bỏ qua database: {detail}', ['detail' => $e->getMessage()]);
                 } finally {
                     if (isset($cnf)) {
                         @unlink($cnf);
                     }
+                    self::rmrf($batchDir);
                 }
+                // Thứ tự như danh sách database của tài khoản (lô và database lớn chạy riêng).
+                $dumped = array_values(array_intersect($acc['databases'], $dumped));
             }
 
             $pw = WNBDirectAdmin::passwd($u);
@@ -940,7 +1014,7 @@ final class WNBEngine
             $added += (int)($r['summary']['data_added_packed'] ?? $r['summary']['data_added'] ?? 0);
         } catch (Throwable $e) {
             try {
-                WNBRestic::forget($dest, array_values(array_filter(array_merge([$snaps['home']], array_values($snaps['dbs'])))));
+                WNBRestic::forget($dest, array_values(array_unique(array_filter(array_merge([$snaps['home']], array_values($snaps['dbs']))))));
             } catch (Throwable $ignored) {
             }
             self::rmrf($work);
@@ -974,7 +1048,7 @@ final class WNBEngine
             'warnings' => $warnings,
             'created_at' => WNB::now(),
             'storage_path' => WNBRestic::repo($dest),
-            'restic' => ['home' => $snaps['home'], 'dbs' => $snaps['dbs'], 'home_path' => $home, 'meta_path' => $work, 'host' => $host],
+            'restic' => ['home' => $snaps['home'], 'dbs' => $snaps['dbs'], 'db_files' => $snaps['db_files'], 'home_path' => $home, 'meta_path' => $work, 'host' => $host],
         ];
         WNBStorage::update('backups', function ($list) use ($record) {
             array_unshift($list, $record);
@@ -1042,6 +1116,113 @@ final class WNBEngine
     private const RESTIC_MIN_FREE_GB = 0.5;
     /** Tải lên theo luồng: chunk 32M cho phép file tới ~320 GB trên S3 (10.000 phần), tốn ~128 MB RAM. */
     private const STREAM_FLAGS = ' --s3-chunk-size 32M --retries 1 --low-level-retries 10';
+    private const DUMP_FLAGS = ' --single-transaction --quick --routines --triggers --events --max-allowed-packet=1G';
+    /** Số database dump cùng lúc: tài khoản hàng nghìn database xong nhanh mà không đè MySQL. */
+    private const DB_PARALLEL = 4;
+    /**
+     * restic: database nhỏ được dump ra thư mục tạm theo lô rồi lưu một snapshot cho cả lô (mỗi lần gọi restic mất vài giây
+     * mở kho, khóa, đọc chỉ mục). Database lớn hơn DB_BATCH_MAX_DB hoặc không biết dung lượng thì dump thẳng vào restic.
+     */
+    private const DB_BATCH_MAX_DB = 1073741824;
+    private const DB_BATCH_BYTES = 2147483648;
+    private const DB_BATCH_COUNT = 200;
+
+    /** Dung lượng (data + index) từng database của user; null nếu không đọc được. */
+    private static function databaseSizes(string $cnf, string $u): ?array
+    {
+        $mysql = WNBShell::which('mysql');
+        if ($mysql === '') {
+            return null;
+        }
+        $pattern = str_replace('_', '\\_', $u) . '\\_%';
+        $sql = "SELECT table_schema, SUM(data_length + index_length) FROM information_schema.tables WHERE table_schema LIKE '" . $pattern . "' GROUP BY table_schema";
+        if (WNBShell::run(sprintf('%s --defaults-extra-file=%s -N -B -e %s', escapeshellarg($mysql), escapeshellarg($cnf), escapeshellarg($sql)), $out) !== 0) {
+            return null;
+        }
+        $sizes = [];
+        foreach ($out as $line) {
+            $f = explode("\t", trim($line));
+            if (count($f) === 2 && is_numeric($f[1])) {
+                $sizes[$f[0]] = (float)$f[1];
+            }
+        }
+        return $sizes;
+    }
+
+    /**
+     * Chia database thành các lô dump ra đĩa và danh sách dump thẳng vào restic.
+     * Mỗi lô chiếm tối đa DB_BATCH_BYTES (và không quá 2/3 chỗ trống còn lại sau khi chừa mức tối thiểu).
+     * @return array{0: array<int, string[]>, 1: string[]}
+     */
+    public static function planDbBatches(array $dbs, ?array $sizes, $free): array
+    {
+        if ($sizes === null || $free === false) {
+            return [[], array_values($dbs)];
+        }
+        $cap = min(self::DB_BATCH_BYTES, ($free - 2 * self::RESTIC_MIN_FREE_GB * 1073741824) / 1.5);
+        $batches = [];
+        $single = [];
+        $cur = [];
+        $sum = 0.0;
+        foreach ($dbs as $db) {
+            $s = (float)($sizes[$db] ?? 0); // không có trong information_schema = chưa có bảng nào
+            if ($s > self::DB_BATCH_MAX_DB || $s > $cap || !preg_match('/^[A-Za-z0-9_\-]+$/', $db)) {
+                $single[] = $db;
+                continue;
+            }
+            if ($cur && ($sum + $s > $cap || count($cur) >= self::DB_BATCH_COUNT)) {
+                $batches[] = $cur;
+                $cur = [];
+                $sum = 0.0;
+            }
+            $cur[] = $db;
+            $sum += $s;
+        }
+        if ($cur) {
+            $batches[] = $cur;
+        }
+        return [$batches, $single];
+    }
+
+    /**
+     * Chạy song song các lệnh dump database (mỗi lệnh chạy bằng bash -o pipefail), tối đa DB_PARALLEL lệnh cùng lúc.
+     * $onDone(số lệnh đã xong) được gọi định kỳ để cập nhật tiến độ. Trả về db => [mã thoát, output].
+     */
+    private static function runDbJobs(array $jobs, callable $onDone): array
+    {
+        $dir = WNBStorage::path('tmp/dbjobs_' . bin2hex(random_bytes(6)));
+        self::mkdirSecure($dir, 0700);
+        try {
+            $names = array_keys($jobs);
+            $list = '';
+            foreach ($names as $i => $db) {
+                file_put_contents($dir . '/' . $i . '.sh', $jobs[$db] . "\n");
+                $list .= $i . ".sh\n";
+            }
+            file_put_contents($dir . '/list', $list);
+            $bash = WNBShell::which('bash') ?: '/bin/bash';
+            $one = escapeshellarg($bash) . ' -o pipefail "$1" > "$1.out" 2>&1; echo $? > "$1.rc"';
+            WNBShell::runWatch(sprintf('cd %s && xargs -n1 -P%d %s -c %s _ < list', escapeshellarg($dir), self::DB_PARALLEL, escapeshellarg($bash), escapeshellarg($one)),
+                $out, function () use ($dir, $onDone) {
+                    $onDone(count(glob($dir . '/*.rc') ?: []));
+                }, 2);
+            $res = [];
+            foreach ($names as $i => $db) {
+                $rc = @file_get_contents($dir . '/' . $i . '.sh.rc');
+                $lines = array_values(array_filter(array_map('rtrim', preg_split('/[\r\n]+/', (string)@file_get_contents($dir . '/' . $i . '.sh.out'))), 'strlen'));
+                $res[$db] = [$rc === false ? 1 : (int)trim($rc), $rc === false && !$lines ? $out : $lines];
+            }
+            return $res;
+        } finally {
+            // Không qua rmrf(): lệnh của nó kiểm tra yêu cầu dừng và sẽ bỏ dở việc dọn khi tác vụ vừa bị dừng.
+            @exec('rm -rf ' . escapeshellarg($dir));
+        }
+    }
+
+    private static function dbProgress(array $task, int $done, int $n): void
+    {
+        self::setTask($task['id'], ['progress' => 15 + (int)floor(19 * min(1, $done / max(1, $n))), 'message' => WNBLang::msg('Dump database {done}/{n}', ['done' => min($done, $n), 'n' => $n])]);
+    }
 
     /** pigz (đa luồng) nếu có, không thì gzip mức 4 (nhanh hơn nhiều so với mặc định, file lớn hơn chút ít). */
     private static function compressor(): string
@@ -1796,7 +1977,7 @@ final class WNBEngine
                 self::step($task, 65, 'Import database');
                 self::restoreDatabases($sel['databases'], '', $warnings, function (string $db) use ($dest, $r) {
                     $snap = (string)($r['dbs'][$db] ?? '');
-                    return $snap === '' ? null : WNBRestic::cmd($dest, 'dump --retry-lock 30m ' . escapeshellarg($snap) . ' ' . escapeshellarg('/' . $db . '.sql'), true);
+                    return $snap === '' ? null : WNBRestic::cmd($dest, 'dump --retry-lock 30m ' . escapeshellarg($snap) . ' ' . escapeshellarg(WNBRestic::dbFile($r, $db)), true);
                 });
             }
             if ($sel['emails']) {
@@ -2071,7 +2252,7 @@ final class WNBEngine
             }
         }
         foreach ((array)($r['dbs'] ?? []) as $db => $snap) {
-            $code = WNBShell::bash(WNBRestic::cmd($dest, 'dump --retry-lock 30m ' . escapeshellarg((string)$snap) . ' ' . escapeshellarg('/' . $db . '.sql'), true) . ' | gzip -c > ' . escapeshellarg($out . '/databases/' . $db . '.sql.gz'), $o);
+            $code = WNBShell::bash(WNBRestic::cmd($dest, 'dump --retry-lock 30m ' . escapeshellarg((string)$snap) . ' ' . escapeshellarg(WNBRestic::dbFile($r, (string)$db)), true) . ' | gzip -c > ' . escapeshellarg($out . '/databases/' . $db . '.sql.gz'), $o);
             if ($code !== 0) {
                 throw new WNBError('Tải bản sao lưu từ cloud thất bại: {detail}', ['detail' => WNBShell::tail($o, 3)]);
             }

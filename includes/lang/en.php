@@ -95,6 +95,7 @@ return [
     'Không sao chép đủ cấu hình DirectAdmin: {detail}' => 'Could not copy all DirectAdmin configuration: {detail}',
     'Không thấy DNS zone của {domain}.' => 'DNS zone for {domain} not found.',
     'Dump {n} database' => 'Dumping {n} database(s)',
+    'Dump database {done}/{n}' => 'Dumping database {done}/{n}',
     'Dump database {db} thất bại: {detail}' => 'Dumping database {db} failed: {detail}',
     'Bỏ qua database: {detail}' => 'Skipped databases: {detail}',
     'Không sao chép đủ cấu hình email {domain}.' => 'Could not copy all email configuration for {domain}.',
