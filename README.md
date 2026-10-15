@@ -2,7 +2,7 @@
 
 Plugin sao lưu và khôi phục cho **DirectAdmin** (giao diện Evolution, sáng/tối), dùng được ở cả ba cấp **Admin, Reseller và User**. Sao lưu lên ổ cứng máy chủ hoặc lên cloud (S3, R2, B2, Google Drive, OneDrive…). Mã hóa và incremental bằng restic, khôi phục được từng file. Song ngữ Tiếng Việt / English.
 
-Phiên bản hiện tại: **2.4.12** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
+Phiên bản hiện tại: **2.5.0** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
 
 ---
 
@@ -22,6 +22,8 @@ Phiên bản hiện tại: **2.4.12** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đ
 - **Thư mục đích mặc định** là `WebNowBackup/<tên máy chủ>`, nên nhiều máy chủ dùng chung một kho mà không đè lên nhau. Khoảng trắng hay ký tự ẩn dính vào khi dán được tự bỏ.
 - **Kho restic**: mỗi kho có mật khẩu riêng (plugin tự tạo, admin xem và cất giữ được). **Mất mật khẩu là mất toàn bộ bản sao lưu trong kho.** Kho tự bảo trì: prune mỗi ngày, check mỗi tuần. Có nút **"Quét lại kho"** để nạp lại danh sách bản sao lưu sau khi cài lại máy chủ.
 - Sửa kho mà vị trí thay đổi thì plugin tự gỡ các bản cũ khỏi danh sách (không xóa dữ liệu ở vị trí cũ), tránh danh sách trỏ tới bản không còn.
+- **"Quét lại kho" cho mọi kiểu kho** (Incremental, Nén, Thư mục, ổ cứng máy chủ): cài lại máy chủ thì thêm lại kho với cùng vị trí rồi bấm Quét lại để nạp lại danh sách bản sao lưu. Kiểu Nén/Thư mục đọc `manifest.json` của từng bản, kể cả bản tạo bằng các phiên bản cũ.
+- **Loại trừ đường dẫn** (Cài đặt): mỗi dòng một mẫu tính từ home, ví dụ `lscache/*`. Mẫu bắt đầu bằng `**/` khớp ở mọi cấp thư mục, ví dụ `**/node_modules`.
 - **Tài khoản nhiều database dump nhanh**: database được `mysqldump` song song (4 luồng). Với kho restic, các database nhỏ được gom theo lô, mỗi lô một snapshot, thay vì mỗi database một lần gọi restic. Database lớn vẫn dump thẳng vào restic. Tài khoản 1200 database không còn mất hàng giờ.
 - Giới hạn băng thông tải lên (`bwlimit`); tiến trình sao lưu chạy với `nice`/`ionice` để không làm chậm web của khách.
 
@@ -41,6 +43,9 @@ Phiên bản hiện tại: **2.4.12** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đ
 - Giống JetBackup và `restic forget`. Ví dụ giữ **7 ngày + 4 tuần + 3 tháng** (bản cuối của mỗi kỳ), bản cũ hơn tự xóa.
 - **"Mọi bản trong N giờ"** (mặc định 24) giữ mọi bản gần đây, nên chạy lịch nhiều lần trong ngày không làm mất bản trước.
 - Bản sao lưu thủ công là nhóm riêng, không bao giờ xóa bản của lịch.
+- **Bản thiếu phần** (database dump lỗi, không có thư mục home) được gắn nhãn "Thiếu phần" và không đẩy mất bản đầy đủ: kỳ nào bản cuối bị thiếu thì giữ thêm bản đầy đủ của kỳ đó, và bản đầy đủ mới nhất luôn được giữ. Bản tạo bằng phiên bản cũ được nhận ra từ cảnh báo đã lưu.
+- Form lịch cho biết **bản cũ nhất lùi về bao nhiêu ngày**. Lưu ý: ngày/tuần/tháng tính cả kỳ hiện tại (giống restic), nên "3 tháng" với lịch hằng ngày chỉ lùi về khoảng 31–60 ngày.
+- **Tự xóa bản mồ côi** (Cài đặt, mặc định tắt): bản của tài khoản đã xóa, và bản của lịch đã xóa hoặc không còn sao lưu tài khoản đó, tự xóa sau N ngày kể từ bản cuối. Mỗi tài khoản vẫn giữ bản mới nhất nếu không có bản đầy đủ nào mới hơn. Lịch đang tắt không bị dọn. Bản sắp xóa có nhãn "Tự xóa …"; vừa bật hoặc rút ngắn thời hạn thì đợi thêm 1 ngày mới xóa.
 
 ### Tác vụ: theo dõi và điều khiển
 
@@ -56,7 +61,7 @@ Phiên bản hiện tại: **2.4.12** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đ
 
 - **Từng phần**: file/thư mục, database, hộp thư email, DNS zone, cron, hoặc **toàn bộ tài khoản**.
 - Dữ liệu được dựng ở vùng staging của root, rồi **rsync vào home bằng quyền của chính user đó**. Symlink hay đường dẫn lừa không thể khiến root ghi ra ngoài.
-- **Tài khoản đã xóa**: bản sao lưu vẫn được giữ. Admin xem, tải về, xóa ở thẻ "Tài khoản đã xóa". Plugin hướng dẫn từng bước tạo lại tài khoản, subdomain, domain pointer, SSL rồi khôi phục toàn bộ.
+- **Tài khoản đã xóa**: bản sao lưu vẫn được giữ (hoặc tự xóa sau N ngày nếu bật "Tự xóa bản mồ côi"). Admin xem, tải về, xóa ở thẻ "Tài khoản đã xóa". Plugin hướng dẫn từng bước tạo lại tài khoản, subdomain, domain pointer, SSL rồi khôi phục toàn bộ.
 - Tài khoản tạo lại trùng tên: bản của tài khoản cũ được gắn nhãn riêng, và chính sách giữ bản của tài khoản mới không xóa mất chúng.
 - Cảnh báo khi khôi phục vào tài khoản còn thiếu tên miền, subdomain hoặc pointer có trong bản sao lưu.
 
@@ -141,7 +146,7 @@ php -n tests/seed.php && php -S 127.0.0.1:8088 router.php
 
 Mở `http://127.0.0.1:8088/?role=admin` (hoặc `reseller`, `user`). Thêm `&theme=dark` để xem giao diện tối, `&iframe=flex` để giả lập khung của DirectAdmin.
 
-Chạy test (362 kiểm tra, PHP 7.4 và 8.5, xem thêm [tests/README.md](tests/README.md)):
+Chạy test (406 kiểm tra, PHP 7.4 và 8.5, xem thêm [tests/README.md](tests/README.md)):
 
 ```bash
 rm -rf data && php -n tests/api_test.php

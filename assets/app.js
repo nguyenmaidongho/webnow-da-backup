@@ -403,6 +403,9 @@
     }
     /** Nhãn cho biết bản này được giữ vì là bản của ngày/tuần/tháng nào (theo lịch). */
     function keepBadges(b) {
+        var complete = b.keep && b.keep.length === 1 && b.keep[0] === 'complete'
+            ? ' <span class="badge ok" title="' + esc(t('Giữ lại vì các bản mới hơn bị thiếu phần (database lỗi hoặc không có home)')) + '">' + esc(t('Bản đầy đủ gần nhất')) + '</span>' : '';
+        if (complete) return complete;
         if (!b.job_id || !b.keep) return '';
         var names = { daily: t('Ngày'), weekly: t('Tuần'), monthly: t('Tháng') };
         // Bản chỉ được giữ vì còn mới: báo cho biết sẽ tự xóa khi quá hạn
@@ -419,6 +422,55 @@
         if (p.weekly) parts.push(t('{n} tuần', { n: p.weekly }));
         if (p.monthly) parts.push(t('{n} tháng', { n: p.monthly }));
         return parts.join(' · ');
+    }
+    /** Bản thiếu phần: home không sao lưu được hoặc có database dump lỗi. */
+    function missingBadge(b) {
+        var m = b.missing || {};
+        var lines = [];
+        if (m.home) lines.push(t('Không có thư mục home'));
+        if (m.databases && m.databases.length) {
+            var named = m.databases.filter(function (x) { return x !== '*'; });
+            lines.push(named.length ? t('Thiếu database: {list}', { list: named.join(', ') }) : t('Thiếu database'));
+        }
+        return lines.length ? ' <span class="badge bad" title="' + esc(lines.join('\n')) + '">' + esc(t('Thiếu phần')) + '</span>' : '';
+    }
+    /** Bản mồ côi sẽ tự xóa (Cài đặt "Tự xóa bản sao lưu mồ côi"). */
+    function expiresBadge(at, why) {
+        if (!at) return '';
+        var d = parseDate(at);
+        var title = { deleted: t('Tài khoản đã bị xóa khỏi DirectAdmin'), previous: t('Bản của tài khoản cũ cùng tên'), job: t('Lịch đã bị xóa hoặc không còn sao lưu tài khoản này') }[why] || '';
+        return ' <span class="badge warn" title="' + esc(title + (title ? '. ' : '') + t('Đổi thời hạn trong Cài đặt → Tự xóa bản sao lưu mồ côi.')) + '">' +
+            esc(d && d.getTime() <= serverNow() ? t('Sắp tự xóa') : t('Tự xóa {when}', { when: fmtRel(at) })) + '</span>';
+    }
+    /**
+     * Bản cũ nhất còn giữ lùi về bao nhiêu ngày: [ít nhất, nhiều nhất] (tháng tính 30 ngày).
+     * Ngày/tuần/tháng tính cả kỳ hiện tại (giống restic), nên "3 tháng" chỉ lùi về khoảng 31–60 ngày với lịch hằng ngày.
+     */
+    function keepSpan(p, type, hours) {
+        var every = type === 'weekly' ? 7 : type === 'hourly' ? Math.max(1, +hours || 1) / 24 : 1;
+        var lo = 0, hi = 0;
+        var add = function (a, b) { lo = Math.max(lo, a); hi = Math.max(hi, b); };
+        if (p.hours) add(p.hours / 24, p.hours / 24);
+        if (p.last > 1) add((p.last - 1) * every, (p.last - 1) * every);
+        [[p.daily, 1], [p.weekly, 7], [p.monthly, 30]].forEach(function (r) {
+            var k = r[0], len = Math.max(r[1], every);
+            if (k > 1) {
+                if (r[1] <= every) add((k - 1) * len, (k - 1) * len);
+                else add((k - 2) * len + every, (k - 1) * len);
+            }
+        });
+        return [Math.round(lo), Math.round(hi)];
+    }
+    /** "lùi ~31–60 ngày" cho bảng lịch. */
+    function keepSpanShort(j) {
+        var s = keepSpan(j.policy || {}, j.schedule_type, j.interval_hours);
+        return s[0] === s[1] ? t('lùi ~{n} ngày', { n: s[1] }) : t('lùi ~{lo}–{hi} ngày', { lo: s[0], hi: s[1] });
+    }
+    function keepSpanText(p, type, hours) {
+        var s = keepSpan(p, type, hours);
+        if (s[1] < 1) return t('Bản cũ nhất còn giữ: chưa tới 1 ngày trước.');
+        return s[0] === s[1] ? t('Bản cũ nhất còn giữ lùi về khoảng {n} ngày trước.', { n: s[1] })
+            : t('Bản cũ nhất còn giữ lùi về khoảng {lo}–{hi} ngày trước, tùy hôm nay là ngày nào trong tuần/tháng (tuần và tháng hiện tại cũng tính là một kỳ).', { lo: s[0], hi: s[1] });
     }
     function typeBadge(b) {
         if (b.type === 'snapshot') return '<span class="badge info">' + esc(t('Snapshot')) + '</span>';
@@ -437,11 +489,12 @@
             case 'delete': return t('Xóa bản sao lưu');
             case 'maintain': return t('Bảo trì kho');
             case 'rescan': return t('Quét lại kho');
+            case 'cleanup': return t('Dọn bản mồ côi');
         }
         return x.type;
     }
     function taskIcon(x) {
-        return { backup: 'archive', snapshot: 'camera', restore: 'restore', download: 'download', delete: 'trash', maintain: 'shield', rescan: 'refresh' }[x.type] || 'activity';
+        return { backup: 'archive', snapshot: 'camera', restore: 'restore', download: 'download', delete: 'trash', maintain: 'shield', rescan: 'refresh', cleanup: 'trash' }[x.type] || 'activity';
     }
     function statusBadge(x) {
         if (x.status === 'running' && x.cancel_by) return '<span class="badge warn run"><span class="dot"></span>' + esc(t('Đang dừng…')) + '</span>';
@@ -458,7 +511,7 @@
     /** Nút Dừng: admin dừng mọi tác vụ; reseller/user chỉ tác vụ chính họ tạo. Tác vụ xóa đang chạy không dừng giữa chừng. */
     function canCancel(x) {
         if (!isActive(x) || x.cancel_by) return false;
-        if (x.status === 'running' && x.type === 'delete') return false;
+        if (x.status === 'running' && (x.type === 'delete' || x.type === 'cleanup')) return false;
         return ROLE === 'admin' || x.initiated_by === S.me.user;
     }
     function scheduleText(j) {
@@ -679,13 +732,15 @@
             return '<tr><td><div class="cell-main">' + esc(a.username) + ' <span class="badge bad">' + esc(t('Đã xóa')) + '</span></div><div class="cell-sub">' + esc(a.domain || '—') + '</div></td>' +
                 '<td class="hide-sm">' + (a.reseller ? esc(a.reseller) : '—') + '</td>' +
                 '<td class="num hide-sm">' + fmtMb(a.size_mb) + '</td>' +
-                '<td><div>' + esc(fmtRel(a.last_backup_at)) + '</div><div class="cell-sub">' + esc(t('{n} bản', { n: a.backups_count })) + '</div></td>' +
+                '<td><div>' + esc(fmtRel(a.last_backup_at)) + '</div><div class="cell-sub">' + esc(t('{n} bản', { n: a.backups_count })) + expiresBadge(a.expires_at, 'deleted') + '</div></td>' +
                 '<td class="actions"><button class="btn btn-sm" data-act="deleted-backups" data-user="' + esc(a.username) + '">' + ic('archive') + esc(t('Xem bản sao lưu')) + '</button>' +
                 (perm('can_restore') ? '<button class="btn btn-sm btn-primary" data-act="deleted-restore" data-user="' + esc(a.username) + '">' + ic('restore') + esc(t('Khôi phục')) + '</button>' : '') +
                 '</td></tr>';
         }).join('');
         return '<div style="height:16px"></div><div class="card"><div class="card-head"><div class="card-title">' + esc(t('Tài khoản đã xóa')) + ' <span class="badge">' + list.length + '</span></div>' +
-            '<span class="muted small right">' + esc(t('Đã bị xóa khỏi DirectAdmin, bản sao lưu vẫn được giữ cho tới khi bạn xóa.')) + '</span></div>' +
+            '<span class="muted small right">' + esc(+S.settings.orphan_days > 0
+                ? t('Đã bị xóa khỏi DirectAdmin. Bản sao lưu tự xóa sau {n} ngày kể từ bản cuối (Cài đặt).', { n: S.settings.orphan_days })
+                : t('Đã bị xóa khỏi DirectAdmin, bản sao lưu vẫn được giữ cho tới khi bạn xóa.')) + '</span></div>' +
             '<div class="table-wrap"><table class="t"><thead><tr><th>' + esc(t('Tài khoản')) + '</th><th class="hide-sm">' + esc(t('Chủ sở hữu')) + '</th><th class="num hide-sm">' + esc(t('Dung lượng')) + '</th><th>' + esc(t('Sao lưu gần nhất')) + '</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
     }
 
@@ -754,7 +809,7 @@
             if (b.domains.length) content.push(ic('globe') + ' ' + b.domains.length);
             return '<tr><td><div class="cell-main nowrap">' + esc(fmtDate(b.created_at)) + '</div><div class="cell-sub">' + esc(fmtRel(b.created_at)) + '</div></td>' +
                 '<td><div class="cell-main">' + esc(b.username) + (b.account_deleted ? ' <span class="badge bad" title="' + esc(t('Tài khoản đã bị xóa khỏi DirectAdmin')) + '">' + esc(t('Đã xóa')) + '</span>' : '') + '</div><div class="cell-sub">' + esc(b.domain || '') + '</div></td>' +
-                '<td>' + typeBadge(b) + keepBadges(b) + (b.previous_owner ? ' <span class="badge warn" title="' + esc(t('Tạo trước khi tài khoản bị xóa rồi tạo lại cùng tên. Chỉ admin thấy bản này.')) + '">' + esc(t('Tài khoản cũ')) + '</span>' : '') + (b.warnings && b.warnings.length ? ' <span class="badge warn" title="' + esc(b.warnings.join('\n')) + '">' + esc(t('{n} cảnh báo', { n: b.warnings.length })) + '</span>' : '') + (b.note && b.type === 'snapshot' ? '<div class="cell-sub ellipsis" style="max-width:220px">' + esc(b.note) + '</div>' : '') + '</td>' +
+                '<td>' + typeBadge(b) + keepBadges(b) + missingBadge(b) + expiresBadge(b.expires_at, b.expires_why) + (b.previous_owner ? ' <span class="badge warn" title="' + esc(t('Tạo trước khi tài khoản bị xóa rồi tạo lại cùng tên. Chỉ admin thấy bản này.')) + '">' + esc(t('Tài khoản cũ')) + '</span>' : '') + (b.warnings && b.warnings.length ? ' <span class="badge warn" title="' + esc(b.warnings.join('\n')) + '">' + esc(t('{n} cảnh báo', { n: b.warnings.length })) + '</span>' : '') + (b.note && b.type === 'snapshot' ? '<div class="cell-sub ellipsis" style="max-width:220px">' + esc(b.note) + '</div>' : '') + '</td>' +
                 '<td class="hide-sm">' + esc(nameOf(b.destination_name)) + '</td>' +
                 '<td class="num">' + fmtMb(b.size_mb) + (b.incremental ? '<div class="cell-sub">' + esc(t('mới {size}', { size: fmtMb(b.new_mb) })) + '</div>' : '') + '</td>' +
                 '<td class="hide-sm muted nowrap">' + content.join('&nbsp;&nbsp;') + '</td>' +
@@ -797,7 +852,7 @@
         var jobs = S.jobs || [];
         var rows = jobs.map(function (j) {
             var active = S.queue.filter(function (x) { return x.job_id === j.id && canCancel(x); }).length;
-            return '<tr><td><div class="cell-main">' + esc(nameOf(j.name)) + '</div><div class="cell-sub">' + esc(destName(j.destination_id)) + ' · ' + esc(t('giữ {policy}', { policy: policyText(j.policy) })) + '</div></td>' +
+            return '<tr><td><div class="cell-main">' + esc(nameOf(j.name)) + '</div><div class="cell-sub">' + esc(destName(j.destination_id)) + ' · ' + esc(t('giữ {policy}', { policy: policyText(j.policy) })) + ' · ' + esc(keepSpanShort(j)) + '</div></td>' +
                 '<td>' + scheduleText(j) + '</td>' +
                 '<td class="hide-sm"><div>' + esc(targetText(j)) + '</div><div class="cell-sub">' + esc(t('{n} tài khoản sẽ sao lưu', { n: j.target_count })) + '</div></td>' +
                 '<td class="hide-sm">' + lastResultBadge(j) + '</td>' +
@@ -891,9 +946,10 @@
             var v = function (n) { return Math.max(0, +form[n].value || 0); };
             var max = v('keep_last') + v('keep_daily') + v('keep_weekly') + v('keep_monthly');
             var hours = v('keep_hours');
+            var span = keepSpanText({ hours: hours, last: v('keep_last'), daily: v('keep_daily'), weekly: v('keep_weekly'), monthly: v('keep_monthly') }, form.schedule_type.value, form.interval_hours.value);
             form.querySelector('[data-keep-hint]').textContent = !max && !hours ? t('Phải giữ ít nhất 1 bản.')
                 : (hours ? t('Mọi bản trong {h} giờ gần nhất đều được giữ, kể cả khi chạy lại nhiều lần trong ngày.', { h: hours }) + ' ' : '') +
-                (max ? t('Bản cũ hơn: giữ bản cuối của mỗi ngày, mỗi tuần, mỗi tháng (tối đa {n} bản, một bản có thể tính cho nhiều mục nên thực tế ít hơn), còn lại tự xóa.', { n: max }) : '');
+                (max ? t('Bản cũ hơn: giữ bản cuối của mỗi ngày, mỗi tuần, mỗi tháng (tối đa {n} bản, một bản có thể tính cho nhiều mục nên thực tế ít hơn), còn lại tự xóa.', { n: max }) + ' ' : '') + span;
         };
         form.addEventListener('input', keepHint);
         var sync = function () {
@@ -950,8 +1006,8 @@
             return '<tr><td><div class="row"><div class="list-icon">' + ic(ty.icon) + '</div><div><div class="cell-main">' + esc(nameOf(d.name)) + '</div><div class="cell-sub mono">' + esc(where) + '</div></div></div></td>' +
                 '<td class="hide-sm">' + esc(t(ty.label)) + '<div class="cell-sub">' + esc(formatLabel(d)) + '</div>' + maint + '</td><td class="num">' + (d.free_gb !== null && d.free_gb !== undefined ? esc(d.free_gb) + ' GB' : '—') + '</td><td>' + test + '</td>' +
                 '<td class="actions"><button class="btn btn-sm" data-act="dest-test" data-id="' + esc(d.id) + '">' + ic('check') + esc(t('Kiểm tra')) + '</button>' +
-                (d.format === 'restic' && d.restic_key ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-key" data-id="' + esc(d.id) + '" title="' + esc(t('Mật khẩu kho restic')) + '" aria-label="' + esc(t('Mật khẩu kho restic')) + '">' + ic('shield') + '</button>' +
-                    '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-rescan" data-id="' + esc(d.id) + '" title="' + esc(t('Quét lại kho')) + '" aria-label="' + esc(t('Quét lại kho')) + '">' + ic('refresh') + '</button>' : '') +
+                (d.format === 'restic' && d.restic_key ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-key" data-id="' + esc(d.id) + '" title="' + esc(t('Mật khẩu kho restic')) + '" aria-label="' + esc(t('Mật khẩu kho restic')) + '">' + ic('shield') + '</button>' : '') +
+                (d.format !== 'restic' || d.restic_key ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-rescan" data-id="' + esc(d.id) + '" title="' + esc(t('Quét lại kho')) + '" aria-label="' + esc(t('Quét lại kho')) + '">' + ic('refresh') + '</button>' : '') +
                 '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-edit" data-id="' + esc(d.id) + '" aria-label="' + esc(t('Sửa')) + '">' + ic('edit') + '</button>' +
                 (d.id !== 'dest_local' ? '<button class="btn btn-sm btn-ghost btn-icon danger" data-act="dest-delete" data-id="' + esc(d.id) + '" aria-label="' + esc(t('Xóa')) + '">' + ic('trash') + '</button>' : '') + '</td></tr>';
         }).join('');
@@ -1195,8 +1251,9 @@
             fieldInput('nice_level', t('Độ ưu tiên CPU (nice)'), s.nice_level, t('19 = thấp nhất, ít ảnh hưởng web nhất.'), '', 'number') +
             fieldInput('job_retry_minutes', t('Thử lại tài khoản lỗi sau (phút)'), s.job_retry_minutes, t('Lịch tự động chạy lại một lần các tài khoản bị lỗi (mạng, cloud chập chờn) trước khi gửi báo cáo. 0 = không thử lại.'), '', 'number') +
             fieldInput('default_retention', t('Giữ lại bản sao lưu thủ công'), s.default_retention, t('Số bản mỗi tài khoản trên mỗi kho.'), '', 'number') +
+            fieldInput('orphan_days', t('Tự xóa bản sao lưu mồ côi sau (ngày)'), s.orphan_days || 0, t('Bản của tài khoản đã xóa, và bản của lịch đã xóa hoặc không còn sao lưu tài khoản đó (mỗi tài khoản vẫn giữ bản mới nhất). Tính từ bản mới nhất. Lịch đang tắt không bị dọn. 0 = không tự xóa.'), '', 'number') +
             fieldInput('bwlimit', t('Giới hạn băng thông cloud'), s.bwlimit, t('Ví dụ 20M. Để trống = không giới hạn.'), 'full') +
-            '<div class="field full"><label>' + esc(t('Không sao lưu các đường dẫn (trong home)')) + '</label><textarea class="textarea" name="excludes" rows="4">' + esc(s.excludes) + '</textarea><div class="hint">' + esc(t('Mỗi dòng một mẫu, tính từ thư mục home. Ví dụ: backups/*, domains/*/public_html/cache/*')) + '</div></div>' +
+            '<div class="field full"><label>' + esc(t('Không sao lưu các đường dẫn (trong home)')) + '</label><textarea class="textarea" name="excludes" rows="4">' + esc(s.excludes) + '</textarea><div class="hint">' + esc(t('Mỗi dòng một mẫu, tính từ thư mục home. Ví dụ: backups/*, lscache/*, domains/*/public_html/wp-content/cache/*. Bắt đầu bằng **/ để khớp ở mọi cấp thư mục, ví dụ **/node_modules.')) + '</div></div>' +
             '</div></div>' +
             '<div class="card"><div class="card-head"><div class="card-title">' + esc(t('Không bao giờ tự sao lưu')) + '</div></div><div class="card-body">' +
             '<p class="card-desc">' + esc(t('Các tài khoản này bị bỏ qua ở mọi lịch tự động (ví dụ tài khoản dev, test). Vẫn sao lưu tay được.')) + '</p>' +
@@ -1608,7 +1665,9 @@
                 break;
             }
             case 'job-delete':
-                confirmBox({ title: t('Xóa lịch?'), body: '<p>' + esc(t('Bản sao lưu đã tạo vẫn được giữ.')) + '</p>', ok: t('Xóa lịch'), danger: true })
+                confirmBox({ title: t('Xóa lịch?'), body: '<p>' + esc(+S.settings.orphan_days > 0
+                    ? t('Bản sao lưu của lịch này tự xóa sau {n} ngày (Cài đặt → Tự xóa bản sao lưu mồ côi). Mỗi tài khoản vẫn giữ bản mới nhất nếu không có bản đầy đủ nào mới hơn.', { n: S.settings.orphan_days })
+                    : t('Bản sao lưu đã tạo vẫn được giữ.')) + '</p>', ok: t('Xóa lịch'), danger: true })
                     .then(function (ok) { if (ok) run(null, api('job_delete', { id: d.id })); });
                 break;
             case 'dest-edit':
@@ -1618,7 +1677,9 @@
                 showResticKey(d.id, false);
                 break;
             case 'dest-rescan':
-                confirmBox({ title: t('Quét lại kho?'), body: '<p>' + esc(t('Đọc toàn bộ snapshot trong kho restic và nạp lại các bản sao lưu chưa có trong danh sách (vd sau khi cài lại máy chủ). Bản nạp lại chỉ admin thấy.')) + '</p>', ok: t('Quét lại kho') })
+                confirmBox({ title: t('Quét lại kho?'), body: '<p>' + esc(d.format === 'restic'
+                    ? t('Đọc toàn bộ snapshot trong kho restic và nạp lại các bản sao lưu chưa có trong danh sách (vd sau khi cài lại máy chủ). Bản nạp lại chỉ admin thấy.')
+                    : t('Đọc manifest.json của từng bản sao lưu trong kho và nạp lại các bản chưa có trong danh sách (vd sau khi cài lại máy chủ), gỡ các bản không còn trong kho. Bản nạp lại chỉ admin thấy.')) + '</p>', ok: t('Quét lại kho') })
                     .then(function (ok) { if (ok) run(el, api('dest_rescan', { id: d.id })); });
                 break;
             case 'dest-test':

@@ -176,7 +176,7 @@ $q = array_values(array_filter($r['data']['state']['queue'], fn($t) => $t['type'
 ok($q && $q[0]['username'] === '' && $q[0]['status'] === 'completed', 'admin thấy tác vụ quét kho');
 $rq = call('reseller_vn', 'reseller', ['action' => 'state'])['data']['queue'];
 ok(!array_filter($rq, fn($t) => $t['type'] === 'rescan'), 'reseller không thấy tác vụ hệ thống');
-ok(!call('admin', 'admin', ['action' => 'dest_rescan', 'id' => 'dest_local', 'csrf' => $ac])['ok'], 'không quét kho không phải restic');
+ok(call('admin', 'admin', ['action' => 'dest_rescan', 'id' => 'dest_local', 'csrf' => $ac])['ok'], 'quét lại được cả kho ổ cứng máy chủ (2.5.0)');
 
 // Cảnh báo khi kiểm tra kho lỗi
 $jobsBak = WNBStorage::read('jobs');

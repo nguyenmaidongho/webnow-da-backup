@@ -242,4 +242,11 @@ return [
     'Thử lại tác vụ lỗi {id} của lịch "{job}".' => 'Retrying failed task {id} of schedule "{job}".',
     'Thành công khi thử lại: {n} tài khoản.' => 'Succeeded on retry: {n} accounts.',
     'Worker không tự dừng sau {n} giây, dừng hẳn worker.' => 'The worker did not stop within {n} seconds; stopping the worker itself.',
+    'Kho đang có tác vụ chạy, hãy đợi xong rồi quét lại.' => 'The destination has running tasks. Wait for them to finish, then rescan.',
+    'Xóa bản sao lưu mồ côi {id} ({user})' => 'Deleting orphaned backup {id} ({user})',
+    'Không xóa được {id}: {detail}' => 'Could not delete {id}: {detail}',
+    'Đã xóa {n} bản sao lưu mồ côi.' => 'Deleted {n} orphaned backups.',
+    'Đọc danh sách bản sao lưu trong kho {dest}' => 'Reading the backup list in {dest}',
+    'Cập nhật danh sách bản sao lưu' => 'Updating the backup list',
+    'Không tìm thấy bản sao lưu nào trong {path}, danh sách được giữ nguyên. Kiểm tra lại thư mục đích của kho.' => 'No backups found in {path}; the list was left unchanged. Check the destination folder.',
 ];

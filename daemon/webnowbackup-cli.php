@@ -65,6 +65,7 @@ switch ($cmd) {
         WNBEngine::cleanup();
         try {
             WNBEngine::scheduleMaintenance();
+            WNBEngine::scheduleOrphanCleanup();
             WNBEngine::healthCheck();
         } catch (Throwable $e) {
             // Giám sát không được làm hỏng lượt cron.

@@ -742,6 +742,7 @@ final class WNBRestic
                 'new_mb' => 0,
                 'warnings' => [],
                 'imported' => true,
+                'imported_at' => WNB::now(),
                 'created_at' => $g['home']['time'],
                 'storage_path' => self::repo($dest),
                 'restic' => ['home' => $g['home']['id'], 'dbs' => $g['dbs'], 'db_files' => $g['db_files'], 'home_path' => $g['home']['hp'], 'meta_path' => $g['home']['mp'], 'host' => $g['home']['host']],

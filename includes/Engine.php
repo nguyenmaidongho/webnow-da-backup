@@ -111,6 +111,9 @@ final class WNBEngine
         return $claimed;
     }
 
+    /** Tác vụ xóa đang chạy không dừng giữa chừng (bản sao lưu sẽ hỏng một nửa). */
+    private const UNSTOPPABLE = ['delete', 'cleanup'];
+
     /** Yêu cầu dừng quá thời gian này mà worker vẫn chưa dừng xong thì cron dừng hẳn worker. */
     public const STOP_TIMEOUT = 180;
 
@@ -191,6 +194,9 @@ final class WNBEngine
                     break;
                 case 'rescan':
                     $res = self::rescanRepo($task);
+                    break;
+                case 'cleanup':
+                    $res = self::cleanupOrphans($task);
                     break;
                 default:
                     throw new WNBError('Loại tác vụ không hợp lệ.');
@@ -279,7 +285,7 @@ final class WNBEngine
                     $result = 'cancelled';
                     return $q;
                 }
-                if ($t['status'] === 'running' && $t['type'] !== 'delete' && empty($t['cancel_by'])) {
+                if ($t['status'] === 'running' && !in_array($t['type'], self::UNSTOPPABLE, true) && empty($t['cancel_by'])) {
                     $t['cancel_by'] = $by;
                     $t['cancel_at'] = WNB::now();
                     $t['message'] = WNBLang::msg('Đang dừng…');
@@ -293,7 +299,7 @@ final class WNBEngine
         if (!$task) {
             throw new WNBError('Không tìm thấy tác vụ.');
         }
-        if ($result === '' && $task['status'] === 'running' && $task['type'] === 'delete') {
+        if ($result === '' && $task['status'] === 'running' && in_array($task['type'], self::UNSTOPPABLE, true)) {
             throw new WNBError('Tác vụ xóa đang chạy không dừng giữa chừng được (bản sao lưu sẽ hỏng một nửa). Hãy đợi nó xong.');
         }
         if ($result === 'cancelled') {
@@ -318,7 +324,7 @@ final class WNBEngine
             if (!isset($ids[$t['status']]) || ($jobId !== '' && ($t['job_id'] ?? '') !== $jobId)) {
                 continue;
             }
-            if ($t['status'] === 'running' && ($t['type'] === 'delete' || !empty($t['cancel_by']))) {
+            if ($t['status'] === 'running' && (in_array($t['type'], self::UNSTOPPABLE, true) || !empty($t['cancel_by']))) {
                 continue;
             }
             $ids[$t['status']][] = $t['id'];
@@ -538,14 +544,37 @@ final class WNBEngine
         return $sizes;
     }
 
-    private static function excludeArgs(): string
+    /**
+     * Mẫu loại trừ trong Cài đặt: [[mẫu tính từ home, ở mọi cấp thư mục?], ...].
+     * Mẫu bắt đầu bằng "**\/" (vd **\/node_modules) khớp ở mọi cấp thư mục trong home; còn lại tính từ gốc home.
+     */
+    public static function excludePatterns(?string $raw = null): array
+    {
+        $list = [];
+        foreach (preg_split('/\r?\n/', $raw ?? (string)WNBStorage::settings()['excludes']) as $pattern) {
+            $pattern = trim($pattern);
+            if ($pattern === '' || strpos($pattern, '..') !== false) {
+                continue;
+            }
+            $any = false;
+            while (strpos($pattern, '**/') === 0) {
+                $pattern = substr($pattern, 3);
+                $any = true;
+            }
+            $pattern = ltrim($pattern, '/');
+            if ($pattern !== '') {
+                $list[] = [$pattern, $any];
+            }
+        }
+        return $list;
+    }
+
+    /** Mẫu loại trừ dạng rsync: "/mẫu" neo ở gốc home, "mẫu" (không có / đầu) khớp ở mọi cấp. */
+    public static function excludeArgs(?string $raw = null): string
     {
         $args = '';
-        foreach (preg_split('/\r?\n/', (string)WNBStorage::settings()['excludes']) as $pattern) {
-            $pattern = trim($pattern);
-            if ($pattern !== '' && strpos($pattern, '..') === false) {
-                $args .= ' --exclude=' . escapeshellarg('/' . ltrim($pattern, '/'));
-            }
+        foreach (self::excludePatterns($raw) as [$pattern, $any]) {
+            $args .= ' --exclude=' . escapeshellarg(($any ? '' : '/') . $pattern);
         }
         return $args;
     }
@@ -711,6 +740,8 @@ final class WNBEngine
                 }
             }
 
+            $missing = self::missingFrom($acc['databases'], $dumped, $home !== '' && is_dir($home));
+
             // 6. Manifest + dung lượng thực tế (du 2 thư mục: phần dùng chung đếm 1 lần -> dòng 2 là dữ liệu mới)
             $fullMb = self::duMb($work)[0] ?? 0;
             if ($archive) {
@@ -741,6 +772,7 @@ final class WNBEngine
                 'size_mb' => $fullMb,
                 'new_mb' => $newMb,
                 'warnings' => $warnings,
+                'missing' => $missing,
                 'created_at' => WNB::now(),
                 'storage_path' => $work,
             ];
@@ -950,26 +982,17 @@ final class WNBEngine
                     break;
                 }
             }
+            $missing = self::missingFrom($acc['databases'], $dumped, $home !== '');
             // Manifest đi kèm snapshot để "Quét lại kho" dựng lại được danh sách khi mất dữ liệu plugin.
             file_put_contents($work . '/manifest.json', json_encode([
                 'id' => $id, 'username' => $u, 'reseller' => $acc['creator'], 'domain' => $acc['domain'], 'domains' => $acc['domains'],
                 'type' => $isSnap ? 'snapshot' : 'backup', 'databases' => $dumped, 'emails' => $acc['emails'], 'crons' => $acc['crons'],
-                'subdomains' => $acc['subdomains'], 'pointers' => $acc['pointers'],
+                'subdomains' => $acc['subdomains'], 'pointers' => $acc['pointers'], 'missing' => $missing,
                 'job_id' => $task['job_id'], 'note' => $task['note'], 'created_at' => WNB::now(), 'host' => $host,
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
 
             self::step($task, 35, 'Sao lưu thư mục home lên {dest} (chỉ phần thay đổi)', ['dest' => $dest['name']]);
-            $excludes = '';
-            if ($home !== '') {
-                foreach (preg_split('/
-?
-/', (string)WNBStorage::settings()['excludes']) as $pattern) {
-                    $pattern = trim($pattern);
-                    if ($pattern !== '' && strpos($pattern, '..') === false) {
-                        $excludes .= ' --exclude=' . escapeshellarg($home . '/' . ltrim($pattern, '/'));
-                    }
-                }
-            }
+            $excludes = $home !== '' ? self::resticExcludeArgs($home) : '';
             $estimate = (float)($acc['usage_mb'] ?? 0) * 1048576;
             $tick = function (string $log) use ($task, $dest, $estimate) {
                 // restic --json in dòng {"message_type":"status","percent_done":..,"total_bytes":..,"bytes_done":..}
@@ -1046,6 +1069,7 @@ final class WNBEngine
             'size_mb' => round($bytes / 1048576, 1),
             'new_mb' => round($added / 1048576, 1),
             'warnings' => $warnings,
+            'missing' => $missing,
             'created_at' => WNB::now(),
             'storage_path' => WNBRestic::repo($dest),
             'restic' => ['home' => $snaps['home'], 'dbs' => $snaps['dbs'], 'db_files' => $snaps['db_files'], 'home_path' => $home, 'meta_path' => $work, 'host' => $host],
@@ -1231,15 +1255,30 @@ final class WNBEngine
         return $pigz !== '' ? escapeshellarg($pigz) . ' -6' : 'gzip -4';
     }
 
-    /** Mẫu loại trừ trong Cài đặt, dạng của tar (tính từ "./" của home). */
-    private static function tarExcludeArgs(): string
+    /**
+     * Mẫu loại trừ dạng tar (GNU tar áp --anchored/--no-anchored cho các --exclude phía sau): mẫu tính từ gốc home
+     * neo ở "./", mẫu "**\/" khớp sau bất kỳ dấu / nào.
+     */
+    public static function tarExcludeArgs(?string $raw = null): string
     {
-        $args = ' --anchored';
-        foreach (preg_split('/\r?\n/', (string)WNBStorage::settings()['excludes']) as $pattern) {
-            $pattern = trim($pattern);
-            if ($pattern !== '' && strpos($pattern, '..') === false) {
-                $args .= ' --exclude=' . escapeshellarg('./' . ltrim($pattern, '/'));
+        $anchored = '';
+        $any = '';
+        foreach (self::excludePatterns($raw) as [$pattern, $isAny]) {
+            if ($isAny) {
+                $any .= ' --exclude=' . escapeshellarg($pattern);
+            } else {
+                $anchored .= ' --exclude=' . escapeshellarg('./' . $pattern);
             }
+        }
+        return ' --anchored' . $anchored . ($any !== '' ? ' --no-anchored' . $any : '');
+    }
+
+    /** Mẫu loại trừ dạng restic (đường dẫn tuyệt đối; "**" khớp mọi cấp thư mục, kể cả không cấp nào). */
+    public static function resticExcludeArgs(string $home, ?string $raw = null): string
+    {
+        $args = '';
+        foreach (self::excludePatterns($raw) as [$pattern, $any]) {
+            $args .= ' --exclude=' . escapeshellarg(rtrim($home, '/') . ($any ? '/**/' : '/') . $pattern);
         }
         return $args;
     }
@@ -1536,13 +1575,61 @@ final class WNBEngine
         return ['last' => max(1, (int)$settings['default_retention'])];
     }
 
+    /** Phần thiếu của một bản vừa sao lưu: [] nếu đủ, ['home' => true] và/hoặc ['databases' => [...]]. */
+    private static function missingFrom(array $wanted, array $dumped, bool $homeOk): array
+    {
+        $m = [];
+        if (!$homeOk) {
+            $m['home'] = true;
+        }
+        $dbs = array_values(array_diff($wanted, $dumped));
+        if ($dbs) {
+            $m['databases'] = $dbs;
+        }
+        return $m;
+    }
+
+    /**
+     * Phần thiếu của bản sao lưu (home không sao lưu được, database dump lỗi). Bản tạo trước 2.5.0 chưa có trường
+     * 'missing' thì suy ra từ cảnh báo đã lưu; '*' = bỏ qua cả phần database (không rõ database nào).
+     */
+    public static function missingParts(array $b): array
+    {
+        if (isset($b['missing']) && is_array($b['missing'])) {
+            return $b['missing'];
+        }
+        $m = [];
+        foreach ((array)($b['warnings'] ?? []) as $w) {
+            $k = is_array($w) ? (string)($w['k'] ?? '') : '';
+            if ($k === 'Không tìm thấy thư mục home.') {
+                $m['home'] = true;
+            } elseif ($k === 'Dump database {db} thất bại: {detail}' && isset($w['v']['db'])) {
+                $m['databases'][] = (string)$w['v']['db'];
+            } elseif ($k === 'Bỏ qua database: {detail}') {
+                $m['databases'][] = '*';
+            }
+        }
+        return $m;
+    }
+
+    public static function isPartial(array $b): bool
+    {
+        return (bool)self::missingParts($b);
+    }
+
     /**
      * Chọn bản giữ lại (giống restic forget --keep-* --keep-within): $list xếp mới -> cũ.
-     * Trả về [id => ['recent'|'last'|'daily'|'weekly'|'monthly', ...]]. Bản mới nhất luôn được giữ.
+     * Trả về [id => ['recent'|'last'|'daily'|'weekly'|'monthly'|'complete', ...]]. Bản mới nhất luôn được giữ.
+     * Bản thiếu phần (database dump lỗi, không có home) không đẩy mất bản đầy đủ: kỳ nào bản cuối bị thiếu phần thì giữ
+     * thêm bản đầy đủ mới nhất của kỳ đó, và bản đầy đủ mới nhất của cả nhóm luôn được giữ ('complete').
      */
     public static function retentionKeep(array $list, array $policy, ?int $now = null): array
     {
         $keep = [];
+        $partial = [];
+        foreach ($list as $b) {
+            $partial[$b['id']] = self::isPartial($b);
+        }
         $hours = max(0, (int)($policy['hours'] ?? 0));
         if ($hours > 0) {
             $since = ($now ?? time()) - $hours * 3600;
@@ -1557,13 +1644,16 @@ final class WNBEngine
         }
         foreach (['daily' => 'Y-m-d', 'weekly' => 'o-W', 'monthly' => 'Y-m'] as $kind => $fmt) {
             $limit = max(0, (int)($policy[$kind] ?? 0));
-            $seen = [];
+            $seen = []; // kỳ => đã có bản đầy đủ chưa
             foreach ($list as $b) {
-                if (count($seen) >= $limit) {
-                    break;
-                }
                 $period = date($fmt, strtotime((string)$b['created_at']) ?: 0);
                 if (!isset($seen[$period])) {
+                    if (count($seen) >= $limit) {
+                        break;
+                    }
+                    $seen[$period] = !$partial[$b['id']];
+                    $keep[$b['id']][] = $kind;
+                } elseif (!$seen[$period] && !$partial[$b['id']]) {
                     $seen[$period] = true;
                     $keep[$b['id']][] = $kind;
                 }
@@ -1571,6 +1661,14 @@ final class WNBEngine
         }
         if ($list && !isset($keep[$list[0]['id']])) {
             $keep[$list[0]['id']][] = 'last';
+        }
+        foreach ($list as $b) {
+            if (!$partial[$b['id']]) {
+                if (!isset($keep[$b['id']])) {
+                    $keep[$b['id']][] = 'complete';
+                }
+                break;
+            }
         }
         return $keep;
     }
@@ -1589,6 +1687,161 @@ final class WNBEngine
             $tags += self::retentionKeep($list, self::groupPolicy($list[0], $jobs));
         }
         return $tags;
+    }
+
+    /* ============================== Bản mồ côi ============================== */
+
+    /**
+     * Bản sao lưu "mồ côi" sẽ tự xóa khi Cài đặt orphan_days > 0. Mốc tính từ bản mới nhất của nhóm (hoặc lúc nạp lại
+     * bằng "Quét lại kho"), không sớm hơn 1 ngày sau khi bật/giảm cài đặt để admin kịp xem nhãn "Tự xóa":
+     *  - tài khoản đã bị xóa khỏi DirectAdmin, hoặc bản của chủ cũ trùng tên: xóa hết;
+     *  - bản của lịch đã xóa hoặc không còn sao lưu tài khoản đó: xóa, trừ bản mới nhất của nhóm (ưu tiên bản đầy đủ)
+     *    khi tài khoản không còn bản đầy đủ nào mới hơn ở chỗ khác.
+     * Lịch đang tắt coi như tạm dừng nên bản của nó không tự xóa. Bản thủ công/snapshot của tài khoản còn tồn tại
+     * đã có giới hạn số bản riêng.
+     * @return array<string, array{at: int, why: string}> why: deleted | previous | job
+     */
+    public static function orphanPlan(?array $backups = null): array
+    {
+        $s = WNBStorage::settings();
+        $days = (int)($s['orphan_days'] ?? 0);
+        if ($days <= 0) {
+            return [];
+        }
+        $users = WNBDirectAdmin::usernames();
+        if (!$users) {
+            return []; // không đọc được danh sách tài khoản thì không đoán tài khoản nào đã bị xóa
+        }
+        $exists = array_flip($users);
+        $backups = $backups ?? WNBStorage::read('backups');
+        $jobs = [];
+        foreach (WNBStorage::read('jobs') as $j) {
+            $jobs[$j['id']] = $j;
+        }
+        $targets = [];
+        $owners = [];
+        $groups = [];
+        foreach ($backups as $b) {
+            $u = (string)($b['username'] ?? '');
+            if (!WNBDirectAdmin::validUsername($u)) {
+                continue;
+            }
+            $key = null;
+            $why = '';
+            if (!isset($exists[$u])) {
+                [$key, $why] = ['d|' . $u, 'deleted'];
+            } else {
+                $k = (string)($b['owner_key'] ?? '');
+                if ($k !== '' && $k !== 'imported') {
+                    $owners[$u] = $owners[$u] ?? WNBDirectAdmin::ownerKey($u);
+                    if (!hash_equals($owners[$u], $k)) {
+                        [$key, $why] = ['p|' . $u . '|' . $k, 'previous'];
+                    }
+                }
+                $jid = (string)($b['job_id'] ?? '');
+                if ($key === null && ($b['type'] ?? 'backup') === 'backup' && $jid !== '') {
+                    $job = $jobs[$jid] ?? null;
+                    if ($job && empty($job['enabled'])) {
+                        continue;
+                    }
+                    if ($job) {
+                        $targets[$jid] = $targets[$jid] ?? array_flip(self::jobTargets($job));
+                    }
+                    if (!$job || !isset($targets[$jid][$u])) {
+                        [$key, $why] = ['j|' . self::groupKey($b), 'job'];
+                    }
+                }
+            }
+            if ($key === null) {
+                continue;
+            }
+            $t = max(strtotime((string)$b['created_at']) ?: 0, strtotime((string)($b['imported_at'] ?? '')) ?: 0);
+            $groups[$key]['why'] = $why;
+            $groups[$key]['list'][] = $b;
+            $groups[$key]['last'] = max($groups[$key]['last'] ?? 0, $t);
+        }
+        $candidate = [];
+        foreach ($groups as $g) {
+            foreach ($g['list'] as $b) {
+                $candidate[$b['id']] = true;
+            }
+        }
+        $grace = (int)($s['orphan_since'] ?? 0) + 86400;
+        $plan = [];
+        foreach ($groups as $g) {
+            $at = max($g['last'] + $days * 86400, $grace);
+            $list = $g['list'];
+            usort($list, fn($a, $b) => strcmp((string)$b['created_at'], (string)$a['created_at']));
+            $spare = '';
+            if ($g['why'] === 'job') {
+                $anchor = $list[0];
+                foreach ($list as $b) {
+                    if (!self::isPartial($b)) {
+                        $anchor = $b;
+                        break;
+                    }
+                }
+                $spare = $anchor['id'];
+                foreach ($backups as $x) {
+                    if (($x['username'] ?? '') === $anchor['username'] && !isset($candidate[$x['id']]) && !self::isPartial($x)
+                        && strcmp((string)$x['created_at'], (string)$anchor['created_at']) > 0) {
+                        $spare = '';
+                        break;
+                    }
+                }
+            }
+            foreach ($list as $b) {
+                if ($b['id'] !== $spare) {
+                    $plan[$b['id']] = ['at' => $at, 'why' => $g['why']];
+                }
+            }
+        }
+        return $plan;
+    }
+
+    /** Cron, tối đa mỗi giờ một lần: có bản mồ côi đến hạn thì xếp một tác vụ dọn (nếu chưa có). */
+    public static function scheduleOrphanCleanup(): void
+    {
+        $state = WNBStorage::read('orphans');
+        if (time() - (int)($state['checked_at'] ?? 0) < 3600) {
+            return;
+        }
+        WNBStorage::write('orphans', ['checked_at' => time()]);
+        foreach (WNBStorage::read('queue') as $t) {
+            if ($t['type'] === 'cleanup' && in_array($t['status'], ['pending', 'running'], true)) {
+                return;
+            }
+        }
+        $now = time();
+        if (array_filter(self::orphanPlan(), fn($o) => $o['at'] <= $now)) {
+            self::enqueue(['type' => 'cleanup', 'username' => '', 'initiated_by' => 'cron']);
+        }
+    }
+
+    private static function cleanupOrphans(array $task): array
+    {
+        $now = time();
+        $due = array_filter(self::orphanPlan(), fn($o) => $o['at'] <= $now);
+        $byId = array_column(WNBStorage::read('backups'), null, 'id');
+        $n = 0;
+        $i = 0;
+        $warnings = [];
+        foreach ($due as $id => $o) {
+            $b = $byId[$id] ?? null;
+            if (!$b || self::backupBusy((string)$id)) {
+                continue;
+            }
+            self::step($task, 5 + (int)(90 * $i++ / max(1, count($due))), 'Xóa bản sao lưu mồ côi {id} ({user})', ['id' => $id, 'user' => $b['username']]);
+            try {
+                self::removeStorage($b);
+            } catch (WNBError $e) {
+                $warnings[] = WNBLang::msg('Không xóa được {id}: {detail}', ['id' => $id, 'detail' => $e->getMessage()]);
+                continue;
+            }
+            WNBStorage::update('backups', fn($l) => array_values(array_filter($l, fn($x) => $x['id'] !== $id)));
+            $n++;
+        }
+        return ['message' => WNBLang::msg('Đã xóa {n} bản sao lưu mồ côi.', ['n' => $n]), 'warnings' => $warnings];
     }
 
     /** Xóa dữ liệu của một bản sao lưu; chỉ xóa đúng thư mục <user>/<id>. */
@@ -2369,12 +2622,15 @@ final class WNBEngine
         return ['message' => WNBLang::msg(isset($checked) ? 'Đã dọn và kiểm tra kho {dest}: không có lỗi' : 'Đã dọn kho {dest}', ['dest' => $dest['name']]), 'warnings' => []];
     }
 
-    /** Nạp lại danh sách bản sao lưu từ kho restic (sau khi cài lại máy chủ hoặc mất dữ liệu plugin). */
+    /** Nạp lại danh sách bản sao lưu từ kho (sau khi cài lại máy chủ hoặc mất dữ liệu plugin). */
     private static function rescanRepo(array $task): array
     {
         $dest = self::findDestination((string)$task['destination_id']);
-        if (!$dest || WNBRclone::destFormat($dest) !== 'restic') {
+        if (!$dest) {
             throw new WNBError('Kho lưu trữ đã bị xóa.');
+        }
+        if (WNBRclone::destFormat($dest) !== 'restic') {
+            return self::rescanFiles($task, $dest);
         }
         if (WNB::isPreview()) {
             return ['message' => WNBLang::msg('Đã nạp {n} bản sao lưu từ kho {dest}.', ['n' => 0, 'dest' => $dest['name']]), 'warnings' => []];
@@ -2400,7 +2656,7 @@ final class WNBEngine
                 $man = json_decode(implode("
 ", $m), true);
                 if (is_array($man)) {
-                    foreach (['reseller', 'domain', 'domains', 'emails', 'crons', 'subdomains', 'pointers', 'note'] as $k) {
+                    foreach (['reseller', 'domain', 'domains', 'emails', 'crons', 'subdomains', 'pointers', 'note', 'missing'] as $k) {
                         if (isset($man[$k])) {
                             $records[$i][$k] = $man[$k];
                         }
@@ -2411,7 +2667,9 @@ final class WNBEngine
         $removed = self::dropMissingSnapshots($dest['id'], array_column($snaps, 'id'), $listedAt);
         if ($records) {
             WNBStorage::update('backups', function ($list) use ($records) {
-                $list = array_merge($list, $records);
+                // Bỏ bản vừa được thêm trong lúc quét (vd sao lưu xong giữa chừng) để không trùng mã.
+                $have = array_flip(array_column($list, 'id'));
+                $list = array_merge($list, array_values(array_filter($records, fn($r) => !isset($have[$r['id']]))));
                 usort($list, fn($a, $b) => strcmp((string)$b['created_at'], (string)$a['created_at']));
                 return $list;
             });
@@ -2420,6 +2678,151 @@ final class WNBEngine
             return ['message' => WNBLang::msg('Đã nạp {n} bản sao lưu từ kho {dest}, gỡ {removed} bản không còn trong kho.', ['n' => count($records), 'dest' => $dest['name'], 'removed' => $removed]), 'warnings' => []];
         }
         return ['message' => WNBLang::msg('Đã nạp {n} bản sao lưu từ kho {dest}.', ['n' => count($records), 'dest' => $dest['name']]), 'warnings' => []];
+    }
+
+    /**
+     * Kho kiểu Nén/Thư mục và ổ cứng máy chủ: mỗi bản có <user>/<id>/manifest.json (bản ghi đầy đủ lúc sao lưu).
+     * Đọc các manifest đó (cloud: chỉ tải manifest, không duyệt sâu vào homedir) để nạp lại bản chưa có trong danh sách
+     * và gỡ bản không còn trong kho. Đọc được cả manifest của các bản cũ (trước 2.2 không có 'format' = Thư mục).
+     */
+    private static function rescanFiles(array $task, array $dest): array
+    {
+        if (WNB::isPreview()) {
+            return ['message' => WNBLang::msg('Đã nạp {n} bản sao lưu từ kho {dest}.', ['n' => 0, 'dest' => $dest['name']]), 'warnings' => []];
+        }
+        $local = $dest['type'] === 'local';
+        if (!$local && !WNBRclone::installed()) {
+            throw new WNBError('Chưa cài rclone nên không duyệt được bản sao lưu trên cloud.');
+        }
+        self::step($task, 10, 'Đọc danh sách bản sao lưu trong kho {dest}', ['dest' => $dest['name']]);
+        $listedAt = WNB::now();
+        $base = $local ? rtrim((string)$dest['path'], '/') : WNBRclone::base($dest);
+        $dir = $base;
+        $tmp = '';
+        if (!$local) {
+            $tmp = self::stagingRoot() . '/rescan_' . preg_replace('/[^A-Za-z0-9_]/', '', $task['id']);
+            self::mkdirSecure($tmp, 0700);
+            $code = WNBShell::run(WNBRclone::cmd('copy ' . escapeshellarg($base) . ' ' . escapeshellarg($tmp)
+                . ' --max-depth 3 --include ' . escapeshellarg('/*/*/manifest.json') . ' --transfers 16 --checkers 16'), $out);
+            if ($code !== 0) {
+                self::rmrf($tmp);
+                throw new WNBError('Không đọc được danh sách file trên cloud: {detail}', ['detail' => WNBShell::tail($out, 2)]);
+            }
+            $dir = $tmp;
+        }
+        $manifests = [];
+        try {
+            foreach (glob($dir . '/*/*/manifest.json') ?: [] as $f) {
+                if (!is_link($f) && !is_link(dirname($f)) && filesize($f) < 4194304) {
+                    $manifests[substr($f, strlen($dir) + 1)] = json_decode((string)@file_get_contents($f), true);
+                }
+            }
+        } finally {
+            if ($tmp !== '') {
+                self::rmrf($tmp);
+            }
+        }
+        $found = [];
+        foreach (array_keys($manifests) as $rel) {
+            $found[] = explode('/', $rel)[1];
+        }
+        $records = self::recordsFromManifests($manifests, $dest, $base, array_column(WNBStorage::read('backups'), 'id'));
+        self::step($task, 80, 'Cập nhật danh sách bản sao lưu');
+        $warnings = [];
+        $removed = 0;
+        if ($found) {
+            $removed = self::dropMissingFiles($dest['id'], $found, $listedAt);
+        } elseif (array_filter(WNBStorage::read('backups'), fn($b) => ($b['destination_id'] ?? '') === $dest['id'])) {
+            // Không thấy bản nào: có thể sai thư mục đích. Giữ nguyên danh sách thay vì gỡ hết.
+            $warnings[] = WNBLang::msg('Không tìm thấy bản sao lưu nào trong {path}, danh sách được giữ nguyên. Kiểm tra lại thư mục đích của kho.', ['path' => $base]);
+        }
+        if ($records) {
+            WNBStorage::update('backups', function ($list) use ($records) {
+                // Bỏ bản vừa được thêm trong lúc quét (vd sao lưu xong giữa chừng) để không trùng mã.
+                $have = array_flip(array_column($list, 'id'));
+                $list = array_merge($list, array_values(array_filter($records, fn($r) => !isset($have[$r['id']]))));
+                usort($list, fn($a, $b) => strcmp((string)$b['created_at'], (string)$a['created_at']));
+                return $list;
+            });
+        }
+        $key = $removed ? 'Đã nạp {n} bản sao lưu từ kho {dest}, gỡ {removed} bản không còn trong kho.' : 'Đã nạp {n} bản sao lưu từ kho {dest}.';
+        return ['message' => WNBLang::msg($key, ['n' => count($records), 'dest' => $dest['name'], 'removed' => $removed]), 'warnings' => $warnings];
+    }
+
+    /**
+     * Bản ghi sao lưu dựng lại từ manifest.json: $manifests = ['<user>/<id>/manifest.json' => mảng manifest].
+     * Bản nạp lại mang owner_key 'imported' (chỉ admin thấy) và imported_at (mốc tính hạn tự xóa bản mồ côi).
+     */
+    public static function recordsFromManifests(array $manifests, array $dest, string $base, array $knownIds): array
+    {
+        $known = array_flip($knownIds);
+        $local = ($dest['type'] ?? 'local') === 'local';
+        $list = fn($m, $k) => array_values(array_filter((array)($m[$k] ?? []), fn($x) => is_string($x) || is_array($x)));
+        $records = [];
+        foreach ($manifests as $rel => $m) {
+            $parts = explode('/', (string)$rel);
+            if (!is_array($m) || count($parts) !== 3 || $parts[2] !== 'manifest.json') {
+                continue;
+            }
+            [$u, $id] = $parts;
+            if (!WNBDirectAdmin::validUsername($u) || !preg_match('/^(bkp|snap)_[A-Za-z0-9_\-]+$/', $id) || isset($known[$id])
+                || ($m['id'] ?? '') !== $id || ($m['username'] ?? '') !== $u
+                || !preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', (string)($m['created_at'] ?? ''))) {
+                continue;
+            }
+            $format = !$local && ($m['format'] ?? 'folder') === 'archive' ? 'archive' : 'folder';
+            $rec = [
+                'id' => $id,
+                'username' => $u,
+                'reseller' => (string)($m['reseller'] ?? ''),
+                'owner_key' => 'imported',
+                'domain' => (string)($m['domain'] ?? ''),
+                'domains' => $list($m, 'domains'),
+                'type' => ($m['type'] ?? '') === 'snapshot' ? 'snapshot' : 'backup',
+                'destination_id' => $dest['id'],
+                'destination_name' => $dest['name'],
+                'destination_type' => $dest['type'],
+                'format' => $format,
+                'home_archive' => $format === 'archive' && !empty($m['home_archive']),
+                'job_id' => (string)($m['job_id'] ?? ''),
+                'note' => (string)($m['note'] ?? ''),
+                'databases' => $list($m, 'databases'),
+                'emails' => $list($m, 'emails'),
+                'crons' => $list($m, 'crons'),
+                'subdomains' => $list($m, 'subdomains'),
+                'pointers' => $list($m, 'pointers'),
+                'incremental' => !empty($m['incremental']),
+                'size_mb' => (float)($m['size_mb'] ?? 0),
+                'new_mb' => (float)($m['new_mb'] ?? 0),
+                'warnings' => $list($m, 'warnings'),
+                'imported' => true,
+                'imported_at' => WNB::now(),
+                'created_at' => (string)$m['created_at'],
+                'storage_path' => $local ? $base . '/' . $u . '/' . $id : WNBRclone::join($base, $u, $id),
+            ];
+            if (isset($m['missing']) && is_array($m['missing'])) {
+                $rec['missing'] = $m['missing'];
+            }
+            $records[] = $rec;
+        }
+        return $records;
+    }
+
+    /** Gỡ khỏi danh sách bản kiểu Nén/Thư mục/local của kho mà thư mục bản sao lưu không còn trong kho. */
+    public static function dropMissingFiles(string $destId, array $foundIds, string $before): int
+    {
+        $have = array_fill_keys($foundIds, true);
+        $gone = [];
+        foreach (WNBStorage::read('backups') as $b) {
+            if (($b['destination_id'] ?? '') === $destId && ($b['format'] ?? '') !== 'restic' && !isset($have[$b['id']])
+                && strcmp((string)$b['created_at'], $before) < 0 && !self::backupBusy($b['id'])) {
+                $gone[] = $b['id'];
+            }
+        }
+        if ($gone) {
+            WNBStorage::update('backups', fn($list) => array_values(array_filter($list, fn($b) => !in_array($b['id'], $gone, true))));
+        }
+        return count($gone);
     }
 
     /**

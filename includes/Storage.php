@@ -127,6 +127,8 @@ final class WNBStorage
             'bwlimit' => '',
             'nice_level' => 19,
             'default_retention' => 7,
+            'orphan_days' => 0,
+            'orphan_since' => 0,
             'max_snapshots_per_user' => 3,
             'snapshot_destination' => 'dest_local',
             'download_ttl_hours' => 24,

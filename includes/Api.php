@@ -213,8 +213,11 @@ final class WNBApi
             case 'dest_rescan':
                 self::requireAdmin($role);
                 $dest = WNBEngine::findDestination($str('id'));
-                if (!$dest || WNBRclone::destFormat($dest) !== 'restic') {
+                if (!$dest) {
                     throw new WNBError('Kho lưu trữ không tồn tại.');
+                }
+                if (WNBEngine::destinationBusy($dest['id'])) {
+                    throw new WNBError('Kho đang có tác vụ chạy, hãy đợi xong rồi quét lại.');
                 }
                 WNBEngine::enqueue(['type' => 'rescan', 'username' => '', 'initiated_by' => $user, 'role' => $role, 'destination_id' => $dest['id']]);
                 WNBEngine::kick();
@@ -362,6 +365,7 @@ final class WNBApi
         $totalMb = 0.0;
         $allBackups = WNBStorage::read('backups');
         $keepTags = WNBEngine::retentionTags($allBackups);
+        $orphans = $role === 'admin' ? WNBEngine::orphanPlan($allBackups) : [];
         $deleted = []; // admin: tài khoản đã bị xóa khỏi DirectAdmin nhưng vẫn còn bản sao lưu
         foreach ($allBackups as $b) {
             $gone = $role === 'admin' && !isset($visibleSet[$b['username']]) && WNBDirectAdmin::validUsername((string)$b['username']);
@@ -374,6 +378,9 @@ final class WNBApi
                 $d = $d ?? ['username' => $b['username'], 'reseller' => '', 'domain' => '', 'domains' => [], 'subdomains' => [], 'pointers' => [], 'databases' => [], 'backups_count' => 0, 'size_mb' => 0.0, 'last_backup_at' => '', 'last_backup_id' => ''];
                 $d['backups_count']++;
                 $d['size_mb'] = round($d['size_mb'] + (float)$b['size_mb'], 1);
+                // Tự xóa (bản mồ côi): mốc muộn nhất trong các bản của tài khoản, rỗng nếu còn bản không tự xóa.
+                $exp = isset($orphans[$b['id']]) ? date('Y-m-d H:i:s', $orphans[$b['id']]['at']) : null;
+                $d['expires_at'] = !array_key_exists('expires_at', $d) ? $exp : ($d['expires_at'] === null || $exp === null ? null : max($d['expires_at'], $exp));
                 if ((string)$b['created_at'] > $d['last_backup_at']) {
                     $d['last_backup_at'] = (string)$b['created_at'];
                     $d['last_backup_id'] = $b['id'];
@@ -389,6 +396,11 @@ final class WNBApi
                 $b['previous_owner'] = true;
             }
             $b['keep'] = $keepTags[$b['id']] ?? [];
+            $b['missing'] = (object)WNBEngine::missingParts($b);
+            if (isset($orphans[$b['id']])) {
+                $b['expires_at'] = date('Y-m-d H:i:s', $orphans[$b['id']]['at']);
+                $b['expires_why'] = $orphans[$b['id']]['why'];
+            }
             unset($b['storage_path'], $b['owner_key'], $b['restic']);
             $b['warnings'] = array_map([WNBLang::class, 'render'], (array)($b['warnings'] ?? []));
             $backups[] = $b;
@@ -1008,7 +1020,13 @@ final class WNBApi
         $serverName = WNB::ulen($serverName) > 60 ? WNB::usub($serverName, 60) : $serverName;
 
         $excludes = implode("\n", array_slice(array_filter(array_map('trim', preg_split('/\r?\n/', (string)($p['excludes'] ?? ''))), fn($l) => $l !== '' && strpos($l, '..') === false), 0, 50));
+        // Bật hoặc rút ngắn thời hạn tự xóa bản mồ côi: chờ thêm 1 ngày để admin kịp xem các bản sắp bị xóa.
+        $orphanDays = max(0, min(3650, (int)($p['orphan_days'] ?? 0)));
+        $cur = WNBStorage::settings();
+        $orphanSince = $orphanDays > 0 && ((int)$cur['orphan_days'] <= 0 || $orphanDays < (int)$cur['orphan_days']) ? time() : (int)$cur['orphan_since'];
         WNBStorage::update('settings', fn($s) => array_merge(WNBStorage::defaultSettings(), $s, [
+            'orphan_days' => $orphanDays,
+            'orphan_since' => $orphanSince,
             'local_backup_root' => $root,
             'max_concurrent_tasks' => max(1, min(8, (int)($p['max_concurrent_tasks'] ?? 2))),
             'job_retry_minutes' => max(0, min(720, (int)($p['job_retry_minutes'] ?? 30))),
