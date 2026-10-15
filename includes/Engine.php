@@ -2370,6 +2370,36 @@ final class WNBEngine
         return trim((string)@file_get_contents('/etc/hostname')) ?: (gethostname() ?: 'server');
     }
 
+    /**
+     * Tên đầy đủ của máy chủ (vd control3.webnow.vn, không phải control3): servername của DirectAdmin,
+     * rồi tới hostname nếu đã có dấu chấm, rồi `hostname -f`. Dùng làm thư mục mặc định trên cloud.
+     */
+    public static function fqdn(): string
+    {
+        static $cached = null;
+        if ($cached !== null) {
+            return $cached;
+        }
+        $names = [];
+        foreach (@file('/usr/local/directadmin/conf/directadmin.conf', FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+            if (strpos($line, 'servername=') === 0) {
+                $names[] = substr($line, 11);
+            }
+        }
+        $names[] = self::hostname();
+        if (!WNB::isPreview() && WNBShell::which('hostname') !== '') {
+            WNBShell::run(escapeshellarg(WNBShell::which('hostname')) . ' -f', $out);
+            $names[] = (string)($out[0] ?? '');
+        }
+        $names = array_values(array_filter(array_map(fn($n) => strtolower(trim((string)$n)), $names), fn($n) => preg_match('/^[a-z0-9][a-z0-9.\-]{0,252}$/', $n)));
+        foreach ($names as $n) {
+            if (strpos($n, '.') !== false) {
+                return $cached = $n;
+            }
+        }
+        return $cached = $names[0] ?? 'server';
+    }
+
     /** Tên máy chủ trong thông báo: tên đặt trong Cài đặt (kèm hostname), mặc định là hostname. */
     public static function serverLabel(): string
     {

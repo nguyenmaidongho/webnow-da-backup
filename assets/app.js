@@ -949,6 +949,8 @@
 
     /** Loại kho dùng được chế độ Nén (khớp WNBRclone::ARCHIVE_TYPES). */
     var ARCHIVE_TYPES = ['s3', 'r2', 'b2', 'sftp', 'ftp', 'drive'];
+    /** Phần đầu thư mục đích là bucket (khớp WNBRclone::BUCKET_TYPES): không có thư mục mặc định. */
+    var BUCKET_TYPES = ['s3', 'r2', 'b2'];
     /** Mật khẩu kho restic: hiện để admin cất giữ ngoài máy chủ. */
     function showResticKey(id, isNew) {
         var d = byId(id, S.destinations);
@@ -1044,7 +1046,7 @@
             '<div class="field"><label>' + esc(t('Loại kho')) + '</label><select class="select" name="type"' + (dest ? ' disabled' : '') + '>' + typeOpts + '</select></div>' +
             '<div class="field full" data-kind="local"><label>' + esc(t('Thư mục trên máy chủ')) + '</label><input class="input mono" name="path" value="' + esc(d.path || '') + '" placeholder="/backup/webnowbackup"><div class="hint">' + esc(t('Nên dùng ổ đĩa riêng. Không được nằm trong thư mục home của khách.')) + '</div></div>' +
             '<div data-kind="remote" class="full form-grid" style="grid-column:1/-1"></div>' +
-            '<div class="field full" data-kind="remote"><label data-subpath-label>' + esc(t('Bucket / thư mục đích')) + '</label><input class="input mono" name="subpath" value="' + esc(d.subpath || '') + '" placeholder="' + esc(t('ten-bucket/server1')) + '">' +
+            '<div class="field full" data-kind="remote"><label data-subpath-label>' + esc(t('Bucket / thư mục đích')) + '</label><input class="input mono" name="subpath" value="' + esc(d.subpath || '') + '" placeholder="' + esc(t('ten-bucket/server1')) + '"><div class="hint" data-subpath-hint></div>' +
             (dest ? '<div class="hint">' + esc(t('Đổi bucket, endpoint hoặc máy chủ = chuyển sang kho khác: danh sách bản sao lưu ở vị trí cũ được gỡ khỏi plugin (dữ liệu ở vị trí cũ không bị xóa). Chỉ đổi khóa truy cập thì giữ nguyên.')) + '</div>' : '') + '</div>' +
             '<div class="field full" data-kind="remote"><label>' + esc(t('Cách lưu trên cloud')) + '</label><select class="select" name="format">' +
             '<option value="restic"' + (d.format === 'restic' ? ' selected' : '') + (S.engine.restic ? '' : ' disabled') + '>' + esc(t('Incremental (restic), khuyên dùng: chỉ tải phần thay đổi')) + (S.engine.restic ? '' : ' (' + esc(t('chưa cài restic')) + ')') + '</option>' +
@@ -1077,7 +1079,9 @@
                 return '<div class="field' + (kind === 'secret-area' ? ' full' : '') + '"><label>' + esc(t(f[1])) + '</label>' + input + (kind === 'secret-area' ? '<div class="hint">' + esc(ph) + '</div>' : '') + '</div>';
             }).join('');
             form.querySelector('[data-subpath-label]').textContent = OAUTH_TYPES[ty] ? t('Thư mục trên {name}', { name: DEST_TYPES[ty].label }) : t('Bucket / thư mục đích');
-            form.subpath.placeholder = OAUTH_TYPES[ty] ? 'WebNowBackup/control3' : t('ten-bucket/server1');
+            var bucket = BUCKET_TYPES.indexOf(ty) !== -1, def = S.default_subpath || 'WebNowBackup/server';
+            form.subpath.placeholder = bucket ? t('ten-bucket/server1') : def;
+            form.querySelector('[data-subpath-hint]').textContent = bucket ? '' : t('Để trống thì dùng {path}, plugin tự tạo thư mục.', { path: def });
             if (OAUTH_TYPES[ty]) {
                 remoteBox.innerHTML = oauthBox(ty, d, dest) + '<details class="adv field full"><summary>' + esc(t('Nhập token thủ công (rclone authorize)')) + '</summary><div class="form-grid">' + fields + '</div></details>';
                 bindOauth(remoteBox.querySelector('[data-oauth]'), ty);

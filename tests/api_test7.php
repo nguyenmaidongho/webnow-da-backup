@@ -86,8 +86,20 @@ foreach (['control3.webnow.vn/webnowbackup', '/control3.webnow.vn/webnowbackup/'
 }
 $r = call('admin', 'admin', ['action' => 'dest_save', 'type' => 'drive', 'name' => 'GD thử', 'subpath' => 'Sao lưu/control3', 'format' => 'archive', 'p_token' => '{"access_token":"x"}', 'csrf' => $ac]);
 ok(!$r['ok'] && strpos($r['error'], '"Sao lưu/control3"') !== false, 'báo rõ thư mục có dấu/khoảng trắng: ' . ($r['error'] ?? ''));
-$r = call('admin', 'admin', ['action' => 'dest_save', 'type' => 'drive', 'name' => 'GD thử', 'subpath' => ' / ', 'format' => 'archive', 'p_token' => '{"access_token":"x"}', 'csrf' => $ac]);
-ok(!$r['ok'] && strpos($r['error'], 'WebNowBackup/control3') !== false, 'thiếu thư mục đích thì gợi ý mẫu');
+// Để trống: kho kiểu thư mục dùng WebNowBackup/<tên đầy đủ của máy chủ>, kho bucket thì bắt nhập
+$def = WNBRclone::defaultSubpath();
+ok(preg_match('#^WebNowBackup/[a-z0-9][a-z0-9.\-]*$#', $def) === 1, 'thư mục mặc định hợp lệ: ' . $def);
+foreach (['drive', 'onedrive', 'sftp'] as $ty) {
+    $r = call('admin', 'admin', ['action' => 'dest_save', 'type' => $ty, 'name' => 'Mặc định ' . $ty, 'subpath' => ' / ', 'format' => 'folder', 'p_token' => '{"access_token":"x"}', 'p_host' => 'sftp.example.com', 'p_user' => 'u', 'csrf' => $ac]);
+    $saved = $r['ok'] ? array_values(array_filter($r['data']['state']['destinations'], fn($d) => $d['name'] === 'Mặc định ' . $ty))[0] : null;
+    ok($saved && $saved['subpath'] === $def, $ty . ' để trống dùng thư mục mặc định: ' . ($r['error'] ?? ''));
+    if ($saved) {
+        call('admin', 'admin', ['action' => 'dest_delete', 'id' => $saved['id'], 'csrf' => $ac]);
+    }
+}
+ok(call('admin', 'admin', ['action' => 'state'])['data']['default_subpath'] === $def, 'giao diện nhận thư mục mặc định');
+$r = call('admin', 'admin', ['action' => 'dest_save', 'type' => 's3', 'name' => 'S3 trống', 'subpath' => '', 'format' => 'archive', 'csrf' => $ac]);
+ok(!$r['ok'] && strpos($r['error'], 'my-bucket/server1') !== false, 'kho bucket để trống thì bắt nhập');
 
 // Bấm Kết nối lại thì vé cũ chưa dùng bị hủy
 $r1 = call('admin', 'admin', ['action' => 'dest_oauth_start', 'kind' => 'drive', 'csrf' => $ac]);

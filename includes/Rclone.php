@@ -26,6 +26,14 @@ final class WNBRclone
      */
     public const ARCHIVE_TYPES = ['s3', 'r2', 'b2', 'sftp', 'ftp', 'drive'];
 
+    /** Loại kho mà phần đầu của thư mục đích là bucket (phải tạo sẵn), nên không tự đặt thư mục mặc định. */
+    public const BUCKET_TYPES = ['s3', 'r2', 'b2'];
+
+    public static function defaultSubpath(): string
+    {
+        return 'WebNowBackup/' . WNBEngine::fqdn();
+    }
+
     public static function supportsArchive(string $type): bool
     {
         return in_array($type, self::ARCHIVE_TYPES, true);

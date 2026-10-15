@@ -469,6 +469,7 @@ final class WNBApi
             $state['settings'] = $settings;
             $state['settings']['telegram_configured'] = $settings['telegram_token'] !== '' && $settings['telegram_chat_id'] !== '';
             $state['server_host'] = WNBEngine::hostname();
+            $state['default_subpath'] = WNBRclone::defaultSubpath();
             unset($state['settings']['telegram_token'], $state['settings']['telegram_chat_id']);
             $state['health'] = array_map(fn($i) => WNBLang::render($i['msg']), WNBEngine::healthIssues());
             $deleted = array_values($deleted);
@@ -692,8 +693,12 @@ final class WNBApi
             }
             // Bỏ khoảng trắng, ký tự ẩn (hay dính khi copy/paste) và dấu / ở hai đầu.
             $sub = (string)preg_replace('#^[\s/\x{200B}-\x{200D}\x{FEFF}]+|[\s/\x{200B}-\x{200D}\x{FEFF}]+$#u', '', preg_replace('#/+#', '/', (string)($p['subpath'] ?? '')));
+            // Kho kiểu thư mục (không phải bucket) để trống: WebNowBackup/<tên đầy đủ của máy chủ>, rclone tự tạo khi kiểm tra.
+            if ($sub === '' && !in_array($type, WNBRclone::BUCKET_TYPES, true)) {
+                $sub = WNBRclone::defaultSubpath();
+            }
             if ($sub === '') {
-                throw new WNBError('Hãy nhập thư mục đích (vd {example}).', ['example' => in_array($type, WNBOAuth::KINDS, true) ? 'WebNowBackup/control3' : 'my-bucket/server1']);
+                throw new WNBError('Hãy nhập thư mục đích (vd {example}).', ['example' => 'my-bucket/server1']);
             }
             if (strpos($sub, '..') !== false || !preg_match('#^[A-Za-z0-9._/\-]+$#', $sub)) {
                 throw new WNBError('Thư mục đích "{path}" không hợp lệ: chỉ dùng chữ không dấu, số, dấu chấm, gạch ngang, gạch dưới và dấu / (không có khoảng trắng).', ['path' => $sub]);
