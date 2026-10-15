@@ -111,12 +111,27 @@ final class WNBEngine
         return $claimed;
     }
 
-    /** Tác vụ "running" mà tiến trình đã chết (server reboot, bị kill) -> đánh dấu lỗi. */
+    /** Yêu cầu dừng quá thời gian này mà worker vẫn chưa dừng xong thì cron dừng hẳn worker. */
+    public const STOP_TIMEOUT = 180;
+
+    /**
+     * Tác vụ "running" mà tiến trình đã chết (server reboot, bị kill) -> đánh dấu lỗi (hoặc "đã dừng" nếu
+     * có người bấm Dừng). Chốt chặn: bấm Dừng quá STOP_TIMEOUT giây mà worker vẫn kẹt -> dừng hẳn worker đó.
+     */
     public static function recoverStale(): void
     {
         if (WNB::isPreview() || !is_dir('/proc')) {
             return;
         }
+        foreach (WNBStorage::read('queue') as $t) {
+            $pid = (int)($t['pid'] ?? 0);
+            if (($t['status'] ?? '') === 'running' && !empty($t['cancel_by']) && $pid > 0 && is_dir('/proc/' . $pid)
+                && strtotime((string)($t['cancel_at'] ?? $t['started_at'])) < time() - self::STOP_TIMEOUT) {
+                WNBStorage::log($t['id'], wnb_t('Worker không tự dừng sau {n} giây, dừng hẳn worker.', ['n' => self::STOP_TIMEOUT]));
+                self::stopChildren($pid, true, 3);
+            }
+        }
+        clearstatcache();
         $jobs = [];
         WNBStorage::update('queue', function ($q) use (&$jobs) {
             $changed = false;
@@ -127,6 +142,7 @@ final class WNBEngine
                         ? WNBLang::msg('Đã dừng bởi {who}.', ['who' => $t['cancel_by']])
                         : WNBLang::msg('Tiến trình bị dừng đột ngột (máy chủ khởi động lại hoặc bị kill).');
                     @unlink(self::cancelFlag($t['id']));
+                    $t['progress'] = 100;
                     $t['finished_at'] = WNB::now();
                     $changed = true;
                     if (!empty($t['job_id'])) {
@@ -146,6 +162,7 @@ final class WNBEngine
         $id = $task['id'];
         WNBLang::set($task['lang'] ?? (string)WNBStorage::settings()['language']);
         $flag = self::cancelFlag($id);
+        WNBShell::$abort = fn() => is_file($flag);
         WNBShell::$guard = function () use ($flag) {
             if (is_file($flag)) {
                 // Chỉ ném một lần: các lệnh dọn bản dở dang sau đó vẫn phải chạy được.
@@ -201,6 +218,7 @@ final class WNBEngine
             }
         } finally {
             WNBShell::$guard = null;
+            WNBShell::$abort = null;
             @unlink($flag);
         }
         if (!empty($task['job_id'])) {
@@ -263,6 +281,7 @@ final class WNBEngine
                 }
                 if ($t['status'] === 'running' && $t['type'] !== 'delete' && empty($t['cancel_by'])) {
                     $t['cancel_by'] = $by;
+                    $t['cancel_at'] = WNB::now();
                     $t['message'] = WNBLang::msg('Đang dừng…');
                     $result = 'stopping';
                     return $q;
@@ -315,72 +334,49 @@ final class WNBEngine
         return $n;
     }
 
-    /**
-     * Dừng các tiến trình con của worker $pid (KHÔNG dừng chính worker): TERM, đợi tối đa 5 giây rồi KILL.
-     * Worker chạy bằng setsid nên mọi lệnh con cùng nhóm tiến trình với nó, kể cả tiến trình mồ côi
-     * của pipeline; thêm cây con theo ppid cho lệnh tự đổi nhóm.
-     */
-    private static function stopChildren(int $pid): void
+    /** Đúng là tiến trình worker của plugin (chống PID bị tái sử dụng). */
+    private static function isWorker(int $pid): bool
     {
-        if ($pid <= 1 || WNB::isPreview() || !is_dir('/proc/' . $pid)) {
+        return $pid > 1 && strpos((string)@file_get_contents('/proc/' . $pid . '/cmdline'), 'webnowbackup-cli.php') !== false;
+    }
+
+    /**
+     * Dừng các tiến trình con của worker $pid ($withWorker: cả chính worker): TERM, đợi tối đa $wait giây rồi KILL.
+     * Worker chạy bằng setsid nên lệnh con cùng nhóm tiến trình với nó, kể cả tiến trình mồ côi của pipeline;
+     * thêm cây con theo ppid cho lệnh tự đổi nhóm (restic chạy rclone trong nhóm riêng).
+     */
+    private static function stopChildren(int $pid, bool $withWorker = false, int $wait = 5): void
+    {
+        if (WNB::isPreview() || !is_dir('/proc/' . $pid) || !self::isWorker($pid)) {
             return;
         }
-        // Chống PID bị tái sử dụng: chỉ đụng tới tiến trình đúng là worker của plugin.
-        if (strpos((string)@file_get_contents('/proc/' . $pid . '/cmdline'), 'webnowbackup-cli.php') === false) {
-            return;
-        }
-        $procs = self::procTable();
+        $procs = WNBShell::procTable();
         $targets = [];
+        foreach (WNBShell::descendants($pid, $procs) as $p) {
+            $targets[$p] = $procs[$p]['start'];
+        }
         if (($procs[$pid]['pgrp'] ?? 0) === $pid) {
             foreach ($procs as $p => $info) {
                 if ($info['pgrp'] === $pid && $p !== $pid) {
-                    $targets[$p] = true;
+                    $targets[$p] = $info['start'];
                 }
             }
         }
-        $todo = [$pid];
-        while ($todo) {
-            $parent = array_pop($todo);
-            foreach ($procs as $p => $info) {
-                if ($info['ppid'] === $parent && $p !== $pid && !isset($targets[$p])) {
-                    $targets[$p] = true;
-                    $todo[] = $p;
-                }
-            }
+        if ($withWorker && isset($procs[$pid])) {
+            $targets[$pid] = $procs[$pid]['start'];
         }
-        $targets = array_keys($targets);
-        if (!$targets) {
+        if (!$targets || !WNBShell::signal($targets, 'TERM', $procs)) {
             return;
         }
-        $list = implode(' ', $targets);
-        // Lệnh bị dừng tạm (SIGSTOP) chỉ nhận TERM sau khi được CONT.
-        WNBShell::run('kill -TERM ' . $list . '; kill -CONT ' . $list);
-        for ($i = 0; $i < 25; $i++) {
+        for ($i = 0; $i < $wait * 5; $i++) {
             usleep(200000);
-            $procs = self::procTable();
-            $targets = array_values(array_filter($targets, fn($p) => isset($procs[$p]) && $procs[$p]['state'] !== 'Z'));
+            $procs = WNBShell::procTable();
+            $targets = array_filter($targets, fn($start, $p) => isset($procs[$p]) && $procs[$p]['start'] === $start && $procs[$p]['state'] !== 'Z', ARRAY_FILTER_USE_BOTH);
             if (!$targets) {
                 return;
             }
         }
-        WNBShell::run('kill -KILL ' . implode(' ', $targets));
-    }
-
-    /** @return array<int, array{state:string, ppid:int, pgrp:int}> */
-    private static function procTable(): array
-    {
-        $out = [];
-        foreach (glob('/proc/[0-9]*/stat') ?: [] as $f) {
-            $s = @file_get_contents($f);
-            $end = $s === false ? false : strrpos($s, ')');
-            if ($end === false) {
-                continue;
-            }
-            // Sau "(tên lệnh) ": state ppid pgrp ...
-            $parts = explode(' ', substr($s, $end + 2));
-            $out[(int)substr($f, 6)] = ['state' => $parts[0], 'ppid' => (int)($parts[1] ?? 0), 'pgrp' => (int)($parts[2] ?? 0)];
-        }
-        return $out;
+        WNBShell::signal($targets, 'KILL');
     }
 
     private static function step(array $task, int $pct, string $key, array $vars = []): void

@@ -12,7 +12,7 @@
 
 define('WNB_ID', 'webnowbackup');
 define('WNB_NAME', 'WebNowBackup');
-define('WNB_VERSION', '2.4.10');
+define('WNB_VERSION', '2.4.11');
 define('WNB_ROOT', dirname(__DIR__));
 define('WNB_PLUGIN_DIR', '/usr/local/directadmin/plugins/' . WNB_ID);
 
@@ -168,10 +168,15 @@ final class WNBShell
     public static function run(string $cmd, &$output = null): int
     {
         self::checkpoint();
-        $lines = [];
-        $code = 1;
-        @exec($cmd . ' 2>&1', $lines, $code);
-        $output = $lines;
+        if (self::$abort !== null && DIRECTORY_SEPARATOR === '/') {
+            // Đang chạy tác vụ trên Linux: chờ theo vòng lặp để tự dừng được lệnh khi bị yêu cầu dừng.
+            $code = self::watch($cmd, $output, null, 5);
+        } else {
+            $lines = [];
+            $code = 1;
+            @exec($cmd . ' 2>&1', $lines, $code);
+            $output = $lines;
+        }
         self::checkpoint();
         return (int)$code;
     }
@@ -190,8 +195,24 @@ final class WNBShell
     public static function runWatch(string $cmd, &$output, callable $tick, int $every = 5): int
     {
         self::checkpoint();
+        $code = self::watch($cmd, $output, $tick, $every);
+        self::checkpoint();
+        return $code;
+    }
+
+    /**
+     * Chạy lệnh bằng proc_open và chờ theo vòng lặp (thay cho exec chặn cứng) để trong lúc chờ:
+     *  - gọi $tick cập nhật tiến độ;
+     *  - nếu tác vụ bị yêu cầu dừng ($abort trả true): TERM cả cây tiến trình con, sau 5 giây KILL.
+     * Nhờ vậy worker tự dừng được lệnh của mình, không phụ thuộc lần kill từ API.
+     */
+    private static function watch(string $cmd, &$output, ?callable $tick, int $every): int
+    {
         $log = WNBStorage::path('tmp/run_' . bin2hex(random_bytes(6)) . '.out');
-        $proc = @proc_open($cmd . ' > ' . escapeshellarg($log) . ' 2>&1', [0 => ['pipe', 'r']], $pipes);
+        // Bọc { } để output của mọi vế (a; b) đều vào file, như exec($cmd . ' 2>&1') trước đây với vế cuối.
+        $full = DIRECTORY_SEPARATOR === '/' ? '{ ' . $cmd . "
+} > " . escapeshellarg($log) . ' 2>&1' : $cmd . ' > ' . escapeshellarg($log) . ' 2>&1';
+        $proc = @proc_open($full, [0 => ['pipe', 'r']], $pipes);
         if (!is_resource($proc)) {
             $output = ['Không chạy được lệnh'];
             return 127;
@@ -199,20 +220,38 @@ final class WNBShell
         fclose($pipes[0]);
         $code = -1;
         $last = microtime(true);
+        $sleep = 10000;
+        $abortAt = null;
+        $victims = [];
+        $lastKill = 0.0;
         while (true) {
             $st = proc_get_status($proc);
             if (!$st['running']) {
                 $code = (int)$st['exitcode'];
                 break;
             }
-            usleep(250000);
-            if (microtime(true) - $last >= $every) {
-                $last = microtime(true);
+            usleep($sleep);
+            $sleep = min(250000, $sleep * 2); // lệnh ngắn trả về gần như ngay, lệnh dài thì đỡ tốn CPU
+            $now = microtime(true);
+            if ($tick !== null && $now - $last >= $every) {
+                $last = $now;
                 try {
                     $tick($log);
                 } catch (Throwable $e) {
                     // tiến độ chỉ để hiển thị, không được làm hỏng lệnh
                 }
+            }
+            if (self::$abort !== null && $now - $lastKill >= 1 && (self::$abort)()) {
+                $abortAt = $abortAt ?? $now;
+                $lastKill = $now;
+                // Gom dần: tiến trình con có thể đổi nhóm (rclone của restic) hoặc mồ côi khi cha chết trước.
+                $procs = self::procTable();
+                foreach (array_merge([(int)$st['pid']], self::descendants((int)$st['pid'], $procs)) as $p) {
+                    if (isset($procs[$p]) && !isset($victims[$p])) {
+                        $victims[$p] = $procs[$p]['start'];
+                    }
+                }
+                self::signal($victims, $now - $abortAt >= 5 ? 'KILL' : 'TERM', $procs);
             }
         }
         $closed = proc_close($proc);
@@ -221,8 +260,65 @@ final class WNBShell
         }
         $output = array_values(array_filter(array_map('rtrim', preg_split('/[\r\n]+/', (string)@file_get_contents($log))), 'strlen'));
         @unlink($log);
-        self::checkpoint();
         return (int)$code;
+    }
+
+    /** Engine đặt khi đang chạy một tác vụ: trả true nếu tác vụ được yêu cầu dừng (kiểm tra trong lúc chờ lệnh). */
+    public static $abort = null;
+
+    /**
+     * Bảng tiến trình từ /proc: pid => trạng thái, ppid, nhóm, thời điểm khởi động (để không kill nhầm PID bị tái sử dụng).
+     * @return array<int, array{state:string, ppid:int, pgrp:int, start:string}>
+     */
+    public static function procTable(): array
+    {
+        $out = [];
+        foreach (glob('/proc/[0-9]*/stat') ?: [] as $f) {
+            $s = @file_get_contents($f);
+            $end = $s === false ? false : strrpos($s, ')');
+            if ($end === false) {
+                continue;
+            }
+            // Sau "(tên lệnh) ": state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime cutime cstime priority nice threads itreal starttime
+            $parts = explode(' ', substr($s, $end + 2));
+            $out[(int)substr($f, 6)] = ['state' => $parts[0], 'ppid' => (int)($parts[1] ?? 0), 'pgrp' => (int)($parts[2] ?? 0), 'start' => (string)($parts[19] ?? '')];
+        }
+        return $out;
+    }
+
+    /** Mọi tiến trình con cháu của $pid. */
+    public static function descendants(int $pid, array $procs): array
+    {
+        $found = [];
+        $todo = [$pid];
+        while ($todo) {
+            $parent = array_pop($todo);
+            foreach ($procs as $p => $info) {
+                if ($info['ppid'] === $parent && $p !== $pid && !isset($found[$p])) {
+                    $found[$p] = true;
+                    $todo[] = $p;
+                }
+            }
+        }
+        return array_keys($found);
+    }
+
+    /** Gửi tín hiệu cho các tiến trình còn sống ĐÚNG là tiến trình đã ghi nhận (cùng thời điểm khởi động). */
+    public static function signal(array $victims, string $sig, ?array $procs = null): int
+    {
+        $procs = $procs ?? self::procTable();
+        $alive = [];
+        foreach ($victims as $p => $start) {
+            if (isset($procs[$p]) && $procs[$p]['start'] === $start && $procs[$p]['state'] !== 'Z') {
+                $alive[] = (int)$p;
+            }
+        }
+        if ($alive) {
+            $list = implode(' ', $alive);
+            // Lệnh bị dừng tạm (SIGSTOP) chỉ nhận TERM sau khi được CONT.
+            @exec('kill -' . $sig . ' ' . $list . ' 2>/dev/null; kill -CONT ' . $list . ' 2>/dev/null');
+        }
+        return count($alive);
     }
 
     /** bash() có theo dõi tiến độ. */

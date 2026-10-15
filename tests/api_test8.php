@@ -107,3 +107,28 @@ ok($r['ok'] && $status($other['id']) === 'cancelled', 'admin dừng tất cả')
 $r = call('admin', 'admin', ['action' => 'task_cancel', 'all' => '1', 'csrf' => $ac]);
 ok($r['ok'] && strpos($r['data']['message'], 'Không có') !== false, 'không còn gì để dừng');
 ok($r['data']['state']['stats']['running'] === 0, 'tác vụ đã dừng không tính là đang chạy');
+
+// 2.4.11: worker tự canh cờ dừng trong lúc chờ lệnh, cron dừng hẳn worker kẹt
+$procs = [
+    100 => ['state' => 'S', 'ppid' => 1, 'pgrp' => 100, 'start' => '1'],   // worker
+    101 => ['state' => 'S', 'ppid' => 100, 'pgrp' => 100, 'start' => '2'], // sh -c
+    102 => ['state' => 'S', 'ppid' => 101, 'pgrp' => 100, 'start' => '3'], // restic
+    103 => ['state' => 'S', 'ppid' => 102, 'pgrp' => 103, 'start' => '4'], // rclone (nhóm riêng)
+    200 => ['state' => 'S', 'ppid' => 1, 'pgrp' => 200, 'start' => '5'],   // tiến trình khác
+];
+$d = WNBShell::descendants(100, $procs);
+sort($d);
+ok($d === [101, 102, 103], 'tìm cả cây con, kể cả tiến trình đổi nhóm: ' . json_encode($d));
+ok(WNBShell::descendants(200, $procs) === [], 'không đụng tiến trình ngoài cây');
+ok(WNBShell::signal([102 => '3'], 'TERM', [102 => ['state' => 'S', 'ppid' => 1, 'pgrp' => 1, 'start' => '9']]) === 0, 'PID bị tái sử dụng (khác thời điểm khởi động) thì không kill');
+ok(WNBShell::signal([102 => '3'], 'TERM', [102 => ['state' => 'Z', 'ppid' => 1, 'pgrp' => 1, 'start' => '3']]) === 0, 'bỏ qua tiến trình zombie');
+ok(WNBShell::$abort === null && WNBShell::$guard === null, 'hết tác vụ thì gỡ điểm kiểm tra dừng');
+ok(WNBEngine::STOP_TIMEOUT === 180, 'chốt chặn dừng hẳn worker sau 3 phút');
+$t5 = WNBEngine::enqueue(['type' => 'backup', 'username' => 'shopgiay', 'initiated_by' => 'admin', 'role' => 'admin', 'destination_id' => 'dest_local']);
+$setRunning($t5['id']);
+WNBEngine::cancelTask($t5['id'], 'admin');
+ok(!empty(WNBEngine::findTask($t5['id'])['cancel_at']), 'ghi thời điểm yêu cầu dừng');
+WNBEngine::execute(WNBEngine::findTask($t5['id']));
+ok($status($t5['id']) === 'cancelled', 'tác vụ dừng xong');
+$code = WNBShell::run('echo xin chao', $o);
+ok($code === 0 && trim($o[0] ?? '') === 'xin chao', 'run() ngoài tác vụ vẫn chạy như cũ');

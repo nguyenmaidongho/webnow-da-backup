@@ -240,4 +240,5 @@ return [
     'Sẽ thử lại lúc {time}.' => 'Will retry at {time}.',
     'Thử lại tác vụ lỗi {id} của lịch "{job}".' => 'Retrying failed task {id} of schedule "{job}".',
     'Thành công khi thử lại: {n} tài khoản.' => 'Succeeded on retry: {n} accounts.',
+    'Worker không tự dừng sau {n} giây, dừng hẳn worker.' => 'The worker did not stop within {n} seconds; stopping the worker itself.',
 ];
