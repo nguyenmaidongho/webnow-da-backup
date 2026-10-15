@@ -443,6 +443,7 @@ window.WNB_EN = {
     'File vẫn được khôi phục, nhưng các mục này chỉ chạy lại sau khi tạo lại trong DirectAdmin ({list}).': 'Files are still restored, but these only work again after you recreate them in DirectAdmin ({list}).',
     'Tên máy chủ trong thông báo': 'Server name in notifications',
     'Hiện ở đầu mọi tin Telegram và tiêu đề email để phân biệt khi nhiều máy chủ gửi về cùng một nơi. Để trống thì dùng hostname {host}.': 'Shown at the top of every Telegram message and in email subjects, to tell servers apart when several report to the same place. Leave empty to use the hostname {host}.',
+    'Thư mục trên {name}': 'Folder on {name}',
     'Đã kết nối': 'Connected',
     'Chưa kết nối': 'Not connected',
     'Kết nối tài khoản khác': 'Connect another account',

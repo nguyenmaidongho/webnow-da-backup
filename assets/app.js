@@ -1044,7 +1044,7 @@
             '<div class="field"><label>' + esc(t('Loại kho')) + '</label><select class="select" name="type"' + (dest ? ' disabled' : '') + '>' + typeOpts + '</select></div>' +
             '<div class="field full" data-kind="local"><label>' + esc(t('Thư mục trên máy chủ')) + '</label><input class="input mono" name="path" value="' + esc(d.path || '') + '" placeholder="/backup/webnowbackup"><div class="hint">' + esc(t('Nên dùng ổ đĩa riêng. Không được nằm trong thư mục home của khách.')) + '</div></div>' +
             '<div data-kind="remote" class="full form-grid" style="grid-column:1/-1"></div>' +
-            '<div class="field full" data-kind="remote"><label>' + esc(t('Bucket / thư mục đích')) + '</label><input class="input mono" name="subpath" value="' + esc(d.subpath || '') + '" placeholder="' + esc(t('ten-bucket/server1')) + '">' +
+            '<div class="field full" data-kind="remote"><label data-subpath-label>' + esc(t('Bucket / thư mục đích')) + '</label><input class="input mono" name="subpath" value="' + esc(d.subpath || '') + '" placeholder="' + esc(t('ten-bucket/server1')) + '">' +
             (dest ? '<div class="hint">' + esc(t('Đổi bucket, endpoint hoặc máy chủ = chuyển sang kho khác: danh sách bản sao lưu ở vị trí cũ được gỡ khỏi plugin (dữ liệu ở vị trí cũ không bị xóa). Chỉ đổi khóa truy cập thì giữ nguyên.')) + '</div>' : '') + '</div>' +
             '<div class="field full" data-kind="remote"><label>' + esc(t('Cách lưu trên cloud')) + '</label><select class="select" name="format">' +
             '<option value="restic"' + (d.format === 'restic' ? ' selected' : '') + (S.engine.restic ? '' : ' disabled') + '>' + esc(t('Incremental (restic), khuyên dùng: chỉ tải phần thay đổi')) + (S.engine.restic ? '' : ' (' + esc(t('chưa cài restic')) + ')') + '</option>' +
@@ -1076,6 +1076,8 @@
                 }
                 return '<div class="field' + (kind === 'secret-area' ? ' full' : '') + '"><label>' + esc(t(f[1])) + '</label>' + input + (kind === 'secret-area' ? '<div class="hint">' + esc(ph) + '</div>' : '') + '</div>';
             }).join('');
+            form.querySelector('[data-subpath-label]').textContent = OAUTH_TYPES[ty] ? t('Thư mục trên {name}', { name: DEST_TYPES[ty].label }) : t('Bucket / thư mục đích');
+            form.subpath.placeholder = OAUTH_TYPES[ty] ? 'WebNowBackup/control3' : t('ten-bucket/server1');
             if (OAUTH_TYPES[ty]) {
                 remoteBox.innerHTML = oauthBox(ty, d, dest) + '<details class="adv field full"><summary>' + esc(t('Nhập token thủ công (rclone authorize)')) + '</summary><div class="form-grid">' + fields + '</div></details>';
                 bindOauth(remoteBox.querySelector('[data-oauth]'), ty);

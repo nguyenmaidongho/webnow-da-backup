@@ -690,9 +690,13 @@ final class WNBApi
             if (!isset(WNBRclone::TYPES[$type])) {
                 throw new WNBError('Loại kho không hợp lệ.');
             }
-            $sub = trim(preg_replace('#/+#', '/', (string)($p['subpath'] ?? '')), '/');
-            if ($sub === '' || strpos($sub, '..') !== false || !preg_match('#^[A-Za-z0-9._/\-]+$#', $sub)) {
-                throw new WNBError('Bucket/thư mục đích không hợp lệ (vd my-bucket/server1).');
+            // Bỏ khoảng trắng, ký tự ẩn (hay dính khi copy/paste) và dấu / ở hai đầu.
+            $sub = (string)preg_replace('#^[\s/\x{200B}-\x{200D}\x{FEFF}]+|[\s/\x{200B}-\x{200D}\x{FEFF}]+$#u', '', preg_replace('#/+#', '/', (string)($p['subpath'] ?? '')));
+            if ($sub === '') {
+                throw new WNBError('Hãy nhập thư mục đích (vd {example}).', ['example' => in_array($type, WNBOAuth::KINDS, true) ? 'WebNowBackup/control3' : 'my-bucket/server1']);
+            }
+            if (strpos($sub, '..') !== false || !preg_match('#^[A-Za-z0-9._/\-]+$#', $sub)) {
+                throw new WNBError('Thư mục đích "{path}" không hợp lệ: chỉ dùng chữ không dấu, số, dấu chấm, gạch ngang, gạch dưới và dấu / (không có khoảng trắng).', ['path' => $sub]);
             }
             $rec['remote'] = $existing['remote'] ?? 'wnb_' . substr($id, 5);
             $rec['subpath'] = $sub;

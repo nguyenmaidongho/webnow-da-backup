@@ -75,6 +75,20 @@ foreach ($r['data']['state']['destinations'] as $d) {
     }
 }
 
+// Thư mục đích: khoảng trắng / ký tự ẩn / dấu / ở hai đầu (hay dính khi copy/paste) được bỏ
+foreach (['control3.webnow.vn/webnowbackup', '/control3.webnow.vn/webnowbackup/', " control3.webnow.vn/webnowbackup \t", "\u{FEFF}control3.webnow.vn//webnowbackup\u{200B}"] as $s) {
+    $r = call('admin', 'admin', ['action' => 'dest_save', 'type' => 'drive', 'name' => 'GD thử', 'subpath' => $s, 'format' => 'archive', 'p_token' => '{"access_token":"x"}', 'csrf' => $ac]);
+    $saved = $r['ok'] ? array_values(array_filter($r['data']['state']['destinations'], fn($d) => $d['name'] === 'GD thử'))[0] : null;
+    ok($saved && $saved['subpath'] === 'control3.webnow.vn/webnowbackup', 'thư mục đích chuẩn hóa: ' . json_encode($s) . ' ' . ($r['error'] ?? ''));
+    if ($saved) {
+        call('admin', 'admin', ['action' => 'dest_delete', 'id' => $saved['id'], 'csrf' => $ac]);
+    }
+}
+$r = call('admin', 'admin', ['action' => 'dest_save', 'type' => 'drive', 'name' => 'GD thử', 'subpath' => 'Sao lưu/control3', 'format' => 'archive', 'p_token' => '{"access_token":"x"}', 'csrf' => $ac]);
+ok(!$r['ok'] && strpos($r['error'], '"Sao lưu/control3"') !== false, 'báo rõ thư mục có dấu/khoảng trắng: ' . ($r['error'] ?? ''));
+$r = call('admin', 'admin', ['action' => 'dest_save', 'type' => 'drive', 'name' => 'GD thử', 'subpath' => ' / ', 'format' => 'archive', 'p_token' => '{"access_token":"x"}', 'csrf' => $ac]);
+ok(!$r['ok'] && strpos($r['error'], 'WebNowBackup/control3') !== false, 'thiếu thư mục đích thì gợi ý mẫu');
+
 // Bấm Kết nối lại thì vé cũ chưa dùng bị hủy
 $r1 = call('admin', 'admin', ['action' => 'dest_oauth_start', 'kind' => 'drive', 'csrf' => $ac]);
 parse_str((string)parse_url($r1['data']['url'], PHP_URL_QUERY), $aq);
