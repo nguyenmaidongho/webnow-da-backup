@@ -12,7 +12,7 @@
 
 define('WNB_ID', 'webnowbackup');
 define('WNB_NAME', 'WebNowBackup');
-define('WNB_VERSION', '2.4.9');
+define('WNB_VERSION', '2.4.10');
 define('WNB_ROOT', dirname(__DIR__));
 define('WNB_PLUGIN_DIR', '/usr/local/directadmin/plugins/' . WNB_ID);
 
@@ -181,6 +181,72 @@ final class WNBShell
     {
         $bash = self::which('bash') ?: '/bin/bash';
         return self::run(escapeshellarg($bash) . ' -o pipefail -c ' . escapeshellarg($script), $output);
+    }
+
+    /**
+     * Như run() nhưng cứ $every giây gọi $tick(file output) trong lúc lệnh còn chạy, để cập nhật tiến độ.
+     * Output ghi ra file tạm (lệnh dài như rsync/tar/restic có thể in rất nhiều dòng tiến độ).
+     */
+    public static function runWatch(string $cmd, &$output, callable $tick, int $every = 5): int
+    {
+        self::checkpoint();
+        $log = WNBStorage::path('tmp/run_' . bin2hex(random_bytes(6)) . '.out');
+        $proc = @proc_open($cmd . ' > ' . escapeshellarg($log) . ' 2>&1', [0 => ['pipe', 'r']], $pipes);
+        if (!is_resource($proc)) {
+            $output = ['Không chạy được lệnh'];
+            return 127;
+        }
+        fclose($pipes[0]);
+        $code = -1;
+        $last = microtime(true);
+        while (true) {
+            $st = proc_get_status($proc);
+            if (!$st['running']) {
+                $code = (int)$st['exitcode'];
+                break;
+            }
+            usleep(250000);
+            if (microtime(true) - $last >= $every) {
+                $last = microtime(true);
+                try {
+                    $tick($log);
+                } catch (Throwable $e) {
+                    // tiến độ chỉ để hiển thị, không được làm hỏng lệnh
+                }
+            }
+        }
+        $closed = proc_close($proc);
+        if ($code === -1) {
+            $code = $closed;
+        }
+        $output = array_values(array_filter(array_map('rtrim', preg_split('/[\r\n]+/', (string)@file_get_contents($log))), 'strlen'));
+        @unlink($log);
+        self::checkpoint();
+        return (int)$code;
+    }
+
+    /** bash() có theo dõi tiến độ. */
+    public static function bashWatch(string $script, &$output, callable $tick, int $every = 5): int
+    {
+        $bash = self::which('bash') ?: '/bin/bash';
+        return self::runWatch(escapeshellarg($bash) . ' -o pipefail -c ' . escapeshellarg($script), $output, $tick, $every);
+    }
+
+    /** Đọc tối đa $bytes cuối của file (đọc tiến độ mới nhất mà không nạp cả file). */
+    public static function tailFile(string $file, int $bytes = 8192): string
+    {
+        $size = @filesize($file);
+        if (!$size) {
+            return '';
+        }
+        $fp = @fopen($file, 'rb');
+        if (!$fp) {
+            return '';
+        }
+        fseek($fp, max(0, $size - $bytes));
+        $data = (string)stream_get_contents($fp);
+        fclose($fp);
+        return $data;
     }
 
     /** Chạy lệnh và đưa dữ liệu vào stdin (dùng cho bí mật, tránh lộ trên danh sách tiến trình). */

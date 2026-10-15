@@ -71,7 +71,7 @@ switch ($cmd) {
         }
         WNBStorage::unlock($lock);
         foreach (WNBStorage::read('queue') as $t) {
-            if ($t['status'] === 'pending') {
+            if (WNBEngine::ready($t)) {
                 WNBEngine::kick();
                 break;
             }

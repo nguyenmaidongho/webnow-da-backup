@@ -123,6 +123,7 @@ final class WNBStorage
         return [
             'local_backup_root' => '/backup/webnowbackup',
             'max_concurrent_tasks' => 2,
+            'job_retry_minutes' => 30,
             'bwlimit' => '',
             'nice_level' => 19,
             'default_retention' => 7,

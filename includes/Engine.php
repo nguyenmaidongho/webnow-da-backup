@@ -29,6 +29,8 @@ final class WNBEngine
             'scope' => $p['scope'] ?? '',
             'items' => array_values($p['items'] ?? []),
             'note' => $p['note'] ?? '',
+            'run_after' => $p['run_after'] ?? null,
+            'retry_of' => $p['retry_of'] ?? '',
             'lang' => WNBLang::get(),
             'status' => 'pending',
             'progress' => 0,
@@ -56,7 +58,7 @@ final class WNBEngine
         }
         $cli = WNB_ROOT . '/daemon/webnowbackup-cli.php';
         $setsid = WNBShell::which('setsid');
-        $pending = count(array_filter(WNBStorage::read('queue'), fn($t) => $t['status'] === 'pending'));
+        $pending = count(array_filter(WNBStorage::read('queue'), [self::class, 'ready']));
         $workers = min(max(1, $pending), max(1, min(8, (int)WNBStorage::settings()['max_concurrent_tasks'])));
         // Mỗi worker tự giữ một slot; worker dư sẽ thoát ngay nên gọi thừa không sao.
         for ($i = 0; $i < $workers; $i++) {
@@ -84,12 +86,18 @@ final class WNBEngine
         }
     }
 
+    /** Tác vụ đang chờ và đã tới giờ chạy (tác vụ thử lại có run_after). */
+    public static function ready(array $t): bool
+    {
+        return ($t['status'] ?? '') === 'pending' && (empty($t['run_after']) || (string)$t['run_after'] <= WNB::now());
+    }
+
     private static function claimNext(): ?array
     {
         $claimed = null;
         WNBStorage::update('queue', function ($q) use (&$claimed) {
             for ($i = count($q) - 1; $i >= 0; $i--) {
-                if (($q[$i]['status'] ?? '') === 'pending') {
+                if (self::ready($q[$i])) {
                     $q[$i]['status'] = 'running';
                     $q[$i]['started_at'] = WNB::now();
                     $q[$i]['pid'] = getmypid();
@@ -660,23 +668,37 @@ final class WNBEngine
             $pw = WNBDirectAdmin::passwd($u);
             $home = $pw['home'] ?? '';
             $prev = $isLocal ? self::latestLocalBackup($u, $dest['id']) : null;
+            $estimate = (float)($acc['usage_mb'] ?? 0) * 1048576;
             if ($home === '' || !is_dir($home)) {
                 $warnings[] = WNBLang::msg('Không tìm thấy thư mục home.');
             } elseif ($archive) {
-                self::streamHomeArchive($home, $remote, $work . '.index', $prefix, $warnings);
+                self::streamHomeArchive($home, $remote, $work . '.index', $prefix, $warnings, function (float $done) use ($task, $estimate, $dest) {
+                    self::homeProgress($task, 35, 80, 'Nén thư mục home lên {dest}: {done} / ~{total}', ['dest' => $dest['name']], $done, $estimate);
+                });
                 $homeArchived = true;
             } else {
                 // Không giữ chủ sở hữu (-o/-g): file sao lưu thuộc root nên KHÔNG bị tính vào quota của khách
                 // khi /backup nằm cùng phân vùng có bật quota. Khi khôi phục, dữ liệu được chown lại cho user.
                 $linkDest = $prev ? ' --link-dest=' . escapeshellarg($prev['storage_path'] . '/homedir') : '';
-                $code = WNBShell::run(sprintf(
-                    '%srsync -rlptH --delete%s%s %s %s',
+                $code = WNBShell::runWatch(sprintf(
+                    '%srsync -rlptH --delete%s%s%s %s %s',
                     $prefix,
+                    self::rsyncProgressFlag(),
                     $linkDest,
                     self::excludeArgs(),
                     escapeshellarg($home . '/'),
                     escapeshellarg($work . '/homedir/')
-                ), $out);
+                ), $out, function (string $log) use ($task, $estimate) {
+                    // --info=progress2: "  1234567  45%  12.3MB/s  0:01:02 (xfr#.., to-chk=..)" (đếm cả file không đổi)
+                    $done = 0;
+                    foreach (preg_split('/[\r\n]+/', WNBShell::tailFile($log, 2048)) as $line) {
+                        if (preg_match('/^\s*([\d,.]+)\s+\d+%/', $line, $m)) {
+                            $done = (float)preg_replace('/\D/', '', $m[1]);
+                        }
+                    }
+                    self::homeProgress($task, 35, 80, 'Đồng bộ thư mục home: {done} / ~{total}', [], $done, $estimate);
+                });
+                $out = array_values(array_filter($out, fn($l) => !preg_match('/^\s*[\d,.]+\s+\d+%/', $l)));
                 if (self::outOfSpace($out)) {
                     throw self::diskFullError($root);
                 } elseif ($code === 23 || $code === 24) {
@@ -878,12 +900,28 @@ final class WNBEngine
                     }
                 }
             }
+            $estimate = (float)($acc['usage_mb'] ?? 0) * 1048576;
+            $tick = function (string $log) use ($task, $dest, $estimate) {
+                // restic --json in dòng {"message_type":"status","percent_done":..,"total_bytes":..,"bytes_done":..}
+                $st = null;
+                foreach (explode("\n", WNBShell::tailFile($log, 65536)) as $line) {
+                    if (strpos($line, '"message_type":"status"') !== false && is_array($j = json_decode(trim($line), true))) {
+                        $st = $j;
+                    }
+                }
+                if ($st) {
+                    $total = (float)($st['total_bytes'] ?? 0);
+                    self::homeProgress($task, 35, 85, 'Sao lưu thư mục home lên {dest}: {done} / {total}', ['dest' => $dest['name']],
+                        (float)($st['bytes_done'] ?? 0), $total > 0 ? $total : $estimate);
+                }
+            };
             foreach ($parent ? [$parent, null] : [null] as $try) {
                 $out = [];
-                $code = WNBShell::run($prefix . WNBRestic::cmd($dest, 'backup --json --retry-lock 30m --host ' . escapeshellarg($host) . $tags
+                // Không phải terminal thì restic chỉ in tiến độ mỗi phút: đặt 5 giây một lần.
+                $code = WNBShell::runWatch('env RESTIC_PROGRESS_FPS=0.2 ' . $prefix . WNBRestic::cmd($dest, 'backup --json --retry-lock 30m --host ' . escapeshellarg($host) . $tags
                     . ' --tag part:home --tag ' . escapeshellarg('hp:' . $home) . ' --tag ' . escapeshellarg('mp:' . $work)
                     . ($try ? ' --parent ' . escapeshellarg($try) : '') . $excludes
-                    . ($home !== '' ? ' ' . escapeshellarg($home) : '') . ' ' . escapeshellarg($work), true), $out);
+                    . ($home !== '' ? ' ' . escapeshellarg($home) : '') . ' ' . escapeshellarg($work), true), $out, $tick);
                 $r = WNBRestic::parseJson($out);
                 $snap = (string)($r['summary']['snapshot_id'] ?? '');
                 // Bản làm mốc không còn trong kho (vd kho vừa đổi vị trí): thử lại một lần không dùng mốc.
@@ -1033,10 +1071,30 @@ final class WNBEngine
      * Nén home thành homedir.tar.gz và đẩy thẳng lên cloud (tar | gzip | rclone rcat), không ghi bản nén ra đĩa.
      * Danh sách file (tar -vv) được lưu kèm thành homedir.index.gz để duyệt mà không phải tải bản nén.
      */
-    private static function streamHomeArchive(string $home, string $remote, string $indexFile, string $prefix, array &$warnings): void
+    private static function streamHomeArchive(string $home, string $remote, string $indexFile, string $prefix, array &$warnings, ?callable $progress = null): void
     {
         $tar = WNBShell::which('tar') ?: 'tar';
-        WNBShell::bash(sprintf(
+        // Tiến độ: cộng dung lượng các file tar đã ghi vào chỉ mục, đọc tiếp từ chỗ lần trước dừng.
+        $offset = 0;
+        $done = 0.0;
+        $tick = function () use ($indexFile, $progress, &$offset, &$done) {
+            $fp = $progress ? @fopen($indexFile, 'rb') : false;
+            if (!$fp) {
+                return;
+            }
+            fseek($fp, $offset);
+            while (($line = fgets($fp)) !== false) {
+                if (substr($line, -1) !== "\n") {
+                    break; // dòng chưa ghi xong, đọc lại lần sau
+                }
+                $offset += strlen($line);
+                $it = WNBRclone::parseIndexLine(rtrim($line, "\n"));
+                $done += $it ? $it['size'] : 0;
+            }
+            fclose($fp);
+            $progress($done);
+        };
+        WNBShell::bashWatch(sprintf(
             '%s%s -C %s -cf - --numeric-owner -vv --index-file=%s --quoting-style=literal%s . | %s%s | %s; echo "WNB_PIPE ${PIPESTATUS[*]}"',
             $prefix,
             escapeshellarg($tar),
@@ -1046,7 +1104,7 @@ final class WNBEngine
             $prefix,
             self::compressor(),
             WNBRclone::cmd('rcat ' . escapeshellarg(WNBRclone::join($remote, 'homedir.tar.gz')) . self::STREAM_FLAGS, true)
-        ), $out);
+        ), $out, $tick);
         [$tarCode, $gzCode, $upCode] = self::pipeStatus($out, 3);
         if ($upCode !== 0) {
             throw new WNBError('Tải lên cloud thất bại: {detail}', ['detail' => WNBShell::tail($out, 3)]);
@@ -1062,6 +1120,37 @@ final class WNBEngine
         if ($code !== 0) {
             $warnings[] = WNBLang::msg('Không lưu được danh sách file của bản nén (vẫn khôi phục được, nhưng không duyệt từng file được): {detail}', ['detail' => WNBShell::tail($out, 2)]);
         }
+    }
+
+    /** Cập nhật tiến độ trong lúc sao lưu home: phần trăm trong khoảng [$from, $to] và dung lượng đã xử lý. */
+    private static function homeProgress(array $task, int $from, int $to, string $key, array $vars, float $done, float $total): void
+    {
+        if ($done <= 0) {
+            return;
+        }
+        $total = max($total, $done);
+        $pct = $from + (int)floor(($to - $from) * min(0.99, $done / $total));
+        self::setTask($task['id'], ['progress' => $pct, 'message' => WNBLang::msg($key, $vars + ['done' => self::humanSize($done), 'total' => self::humanSize($total)])]);
+    }
+
+    public static function humanSize(float $bytes): string
+    {
+        if ($bytes >= 1073741824) {
+            return round($bytes / 1073741824, 1) . ' GB';
+        }
+        return max(0, (int)round($bytes / 1048576)) . ' MB';
+    }
+
+    /** rsync 3.1+ có --info=progress2 (tiến độ cả lượt); bản cũ hơn thì bỏ qua, không làm hỏng sao lưu. */
+    private static function rsyncProgressFlag(): string
+    {
+        static $flag = null;
+        if ($flag === null) {
+            WNBShell::run('rsync --version', $out);
+            $flag = preg_match('/version\s+v?(\d+)\.(\d+)/', implode("\n", (array)$out), $m) && ((int)$m[1] > 3 || ((int)$m[1] === 3 && (int)$m[2] >= 1))
+                ? ' --info=progress2 --no-human-readable' : '';
+        }
+        return $flag;
     }
 
     /** Đọc dòng "WNB_PIPE a b c" (mã thoát từng lệnh của pipeline) và bỏ nó khỏi $out. */
@@ -2293,6 +2382,48 @@ final class WNBEngine
         }
     }
 
+    /** Lỗi thử lại cũng không hết (thiếu chỗ, thiếu công cụ, tài khoản/kho đã xóa): báo luôn, không thử lại. */
+    private const NO_RETRY = [
+        self::DISK_FULL,
+        'Tài khoản {user} không tồn tại.',
+        'Kho lưu trữ đã bị xóa.',
+        'Chưa cài rclone nên không sao lưu lên cloud được.',
+        'Kho chỉ còn {free} GB trống (tối thiểu {min} GB). Hãy dọn bớt hoặc giảm số bản giữ lại.',
+        'Ổ đĩa chứa {path} gần hết inode (chỉ còn {n} inode trống) nên không tạo thêm file được. Hãy xóa bớt file nhỏ (bản sao lưu cũ, session, mail queue) hoặc chuyển thư mục lưu trữ sang ổ khác.',
+        'Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.',
+        'Chưa có mật khẩu kho restic. Hãy mở kho trong mục Kho lưu trữ và lưu lại.',
+    ];
+
+    /**
+     * Tài khoản lỗi trong lượt chạy lịch được thử lại MỘT lần sau job_retry_minutes phút (lỗi mạng, cloud
+     * chập chờn, khóa restic...). Trả về true nếu đã xếp lịch thử lại (báo cáo đợi tới khi thử lại xong).
+     */
+    private static function retryFailed(array $job, array $run, array $retried): bool
+    {
+        $minutes = (int)(WNBStorage::settings()['job_retry_minutes'] ?? 30);
+        if ($minutes <= 0 || empty($job['enabled'])) {
+            return false;
+        }
+        $at = date('Y-m-d H:i:s', time() + $minutes * 60);
+        $n = 0;
+        foreach ($run as $t) {
+            if ($t['status'] !== 'failed' || !empty($t['retry_of']) || isset($retried[$t['id']])
+                || in_array((string)($t['message']['k'] ?? ''), self::NO_RETRY, true)) {
+                continue;
+            }
+            $new = self::enqueue([
+                'type' => $t['type'], 'username' => $t['username'], 'initiated_by' => $t['initiated_by'], 'role' => $t['role'] ?? 'admin',
+                'destination_id' => $t['destination_id'], 'job_id' => $t['job_id'], 'job_run' => $t['job_run'], 'note' => $t['note'] ?? '',
+                'run_after' => $at, 'retry_of' => $t['id'],
+            ]);
+            self::setTask($t['id'], ['retried_by' => $new['id']]);
+            WNBStorage::log($t['id'], wnb_t('Sẽ thử lại lúc {time}.', ['time' => $at]));
+            WNBStorage::log($new['id'], wnb_t('Thử lại tác vụ lỗi {id} của lịch "{job}".', ['id' => $t['id'], 'job' => $job['name']]));
+            $n++;
+        }
+        return $n > 0;
+    }
+
     /** Khi mọi tác vụ của lượt chạy lịch đã xong: ghi kết quả và gửi một báo cáo duy nhất. */
     public static function maybeJobReport(string $jobId): void
     {
@@ -2307,13 +2438,30 @@ final class WNBEngine
             if (!$job || empty($job['last_run']) || ($job['reported_run'] ?? '') === $job['last_run']) {
                 return;
             }
-            $stats = ['total' => 0, 'done' => 0, 'failed' => 0, 'cancelled' => 0, 'warnings' => 0, 'size_mb' => 0.0, 'failures' => []];
+            $run = [];
+            $retried = [];
             foreach (WNBStorage::read('queue') as $t) {
                 if (($t['job_id'] ?? '') !== $jobId || ($t['job_run'] ?? '') !== $job['last_run']) {
                     continue;
                 }
                 if (in_array($t['status'], ['pending', 'running'], true)) {
-                    return; // lượt chạy chưa xong
+                    return; // lượt chạy chưa xong (kể cả tác vụ thử lại đang đợi tới giờ)
+                }
+                $run[] = $t;
+                if (!empty($t['retry_of'])) {
+                    $retried[$t['retry_of']] = true;
+                }
+            }
+            if (self::retryFailed($job, $run, $retried)) {
+                return; // báo cáo sau khi các tài khoản lỗi được thử lại
+            }
+            $stats = ['total' => 0, 'done' => 0, 'failed' => 0, 'cancelled' => 0, 'retried' => 0, 'warnings' => 0, 'size_mb' => 0.0, 'failures' => []];
+            foreach ($run as $t) {
+                if (isset($retried[$t['id']])) {
+                    continue; // lần lỗi đầu đã được thay bằng lần thử lại
+                }
+                if (!empty($t['retry_of']) && $t['status'] === 'completed') {
+                    $stats['retried']++;
                 }
                 $stats['total']++;
                 if ($t['status'] === 'cancelled') {
@@ -2331,7 +2479,7 @@ final class WNBEngine
                 foreach ($l as &$j) {
                     if ($j['id'] === $jobId) {
                         $j['reported_run'] = $job['last_run'];
-                        $j['last_result'] = ['total' => $stats['total'], 'skipped' => $skipped, 'done' => $stats['done'], 'failed' => $stats['failed'], 'cancelled' => $stats['cancelled'], 'warnings' => $stats['warnings'], 'finished_at' => WNB::now()];
+                        $j['last_result'] = ['total' => $stats['total'], 'skipped' => $skipped, 'done' => $stats['done'], 'failed' => $stats['failed'], 'cancelled' => $stats['cancelled'], 'retried' => $stats['retried'], 'warnings' => $stats['warnings'], 'finished_at' => WNB::now()];
                     }
                 }
                 return $l;
@@ -2346,6 +2494,9 @@ final class WNBEngine
             $body = '';
             if ($skipped) {
                 $body .= wnb_t('Bỏ qua {n} tài khoản đang có tác vụ chạy.', ['n' => $skipped]) . "\n";
+            }
+            if ($stats['retried']) {
+                $body .= wnb_t('Thành công khi thử lại: {n} tài khoản.', ['n' => $stats['retried']]) . "\n";
             }
             if ($stats['cancelled']) {
                 $body .= wnb_t('Đã dừng {n} tác vụ.', ['n' => $stats['cancelled']]) . "\n";

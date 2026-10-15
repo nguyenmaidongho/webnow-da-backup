@@ -234,4 +234,10 @@ return [
     'Tác vụ xóa đang chạy không dừng giữa chừng được (bản sao lưu sẽ hỏng một nửa). Hãy đợi nó xong.' => 'A running delete task cannot be stopped midway (the backup would be left half deleted). Please wait for it to finish.',
     '{who} yêu cầu dừng tác vụ.' => '{who} asked to stop the task.',
     'Tác vụ đã bị dừng.' => 'The task was stopped.',
+    'Nén thư mục home lên {dest}: {done} / ~{total}' => 'Compressing home directory to {dest}: {done} / ~{total}',
+    'Đồng bộ thư mục home: {done} / ~{total}' => 'Syncing home directory: {done} / ~{total}',
+    'Sao lưu thư mục home lên {dest}: {done} / {total}' => 'Backing up home directory to {dest}: {done} / {total}',
+    'Sẽ thử lại lúc {time}.' => 'Will retry at {time}.',
+    'Thử lại tác vụ lỗi {id} của lịch "{job}".' => 'Retrying failed task {id} of schedule "{job}".',
+    'Thành công khi thử lại: {n} tài khoản.' => 'Succeeded on retry: {n} accounts.',
 ];

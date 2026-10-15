@@ -473,5 +473,9 @@ window.WNB_EN = {
     'Mọi tác vụ đang chờ và đang chạy sẽ bị dừng (trừ tác vụ xóa đang chạy). Bản sao lưu dở dang sẽ bị xóa.': 'All waiting and running tasks will be stopped (except running delete tasks). Unfinished backups will be removed.',
     'Dừng tất cả': 'Stop all',
     'Dừng lượt chạy?': 'Stop this run?',
-    'Dừng {n} tác vụ còn lại của lịch "{job}". Tài khoản đã sao lưu xong vẫn giữ bản sao lưu; lịch vẫn chạy lại vào lần tới.': 'Stop the {n} remaining tasks of schedule "{job}". Accounts already backed up keep their backups; the schedule still runs next time.'
+    'Dừng {n} tác vụ còn lại của lịch "{job}". Tài khoản đã sao lưu xong vẫn giữ bản sao lưu; lịch vẫn chạy lại vào lần tới.': 'Stop the {n} remaining tasks of schedule "{job}". Accounts already backed up keep their backups; the schedule still runs next time.',
+    'Thử lại lúc {time}': 'Retry at {time}',
+    'Lỗi · đã xếp thử lại': 'Failed · retry scheduled',
+    'Thử lại tài khoản lỗi sau (phút)': 'Retry failed accounts after (minutes)',
+    'Lịch tự động chạy lại một lần các tài khoản bị lỗi (mạng, cloud chập chờn) trước khi gửi báo cáo. 0 = không thử lại.': 'Schedules run failed accounts once more (network or cloud hiccups) before sending the report. 0 = no retry.'
 };

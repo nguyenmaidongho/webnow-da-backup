@@ -447,7 +447,9 @@
         if (x.status === 'running' && x.cancel_by) return '<span class="badge warn run"><span class="dot"></span>' + esc(t('Đang dừng…')) + '</span>';
         if (x.status === 'cancelled') return '<span class="badge">' + esc(t('Đã dừng')) + '</span>';
         if (x.status === 'running') return '<span class="badge info run"><span class="dot"></span>' + esc(t('Đang chạy')) + '</span>';
+        if (x.status === 'pending' && x.run_after) return '<span class="badge warn">' + ic('refresh') + esc(t('Thử lại lúc {time}', { time: fmtDate(x.run_after) })) + '</span>';
         if (x.status === 'pending') return '<span class="badge"><span class="dot"></span>' + esc(t('Đang chờ')) + '</span>';
+        if (x.status === 'failed' && x.retried_by) return '<span class="badge bad">' + esc(t('Lỗi · đã xếp thử lại')) + '</span>';
         if (x.status === 'failed') return '<span class="badge bad">' + esc(t('Lỗi')) + '</span>';
         if (x.warnings) return '<span class="badge warn">' + esc(t('Hoàn tất · {n} cảnh báo', { n: x.warnings })) + '</span>';
         return '<span class="badge ok">' + esc(t('Hoàn tất')) + '</span>';
@@ -1191,6 +1193,7 @@
             fieldInput('min_free_gb', t('Dung lượng trống tối thiểu (GB)'), s.min_free_gb, t('Không chạy sao lưu khi kho còn ít hơn mức này, tránh làm đầy ổ đĩa.'), '', 'number') +
             fieldInput('max_concurrent_tasks', t('Tác vụ chạy song song'), s.max_concurrent_tasks, t('1–8. Tăng nếu máy chủ mạnh.'), '', 'number') +
             fieldInput('nice_level', t('Độ ưu tiên CPU (nice)'), s.nice_level, t('19 = thấp nhất, ít ảnh hưởng web nhất.'), '', 'number') +
+            fieldInput('job_retry_minutes', t('Thử lại tài khoản lỗi sau (phút)'), s.job_retry_minutes, t('Lịch tự động chạy lại một lần các tài khoản bị lỗi (mạng, cloud chập chờn) trước khi gửi báo cáo. 0 = không thử lại.'), '', 'number') +
             fieldInput('default_retention', t('Giữ lại bản sao lưu thủ công'), s.default_retention, t('Số bản mỗi tài khoản trên mỗi kho.'), '', 'number') +
             fieldInput('bwlimit', t('Giới hạn băng thông cloud'), s.bwlimit, t('Ví dụ 20M. Để trống = không giới hạn.'), 'full') +
             '<div class="field full"><label>' + esc(t('Không sao lưu các đường dẫn (trong home)')) + '</label><textarea class="textarea" name="excludes" rows="4">' + esc(s.excludes) + '</textarea><div class="hint">' + esc(t('Mỗi dòng một mẫu, tính từ thư mục home. Ví dụ: backups/*, domains/*/public_html/cache/*')) + '</div></div>' +

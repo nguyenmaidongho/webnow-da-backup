@@ -107,13 +107,14 @@ WNBStorage::write('backups', [
     ['id' => 'b3', 'username' => 'admin', 'type' => 'snapshot', 'created_at' => $ago(1), 'size_mb' => 1],
 ]);
 ok($codes() === ['stale:admin,nhakhoa,reseller_vn'], 'tài khoản quá hạn (snapshot không tính): ' . json_encode($codes()));
-WNBStorage::update('jobs', function ($l) use ($ago) {
-    $l[0]['last_run'] = $ago(72);
+$run72 = $ago(72); // tính một lần: gọi hai lần có thể lệch một giây
+WNBStorage::update('jobs', function ($l) use ($ago, $run72) {
+    $l[0]['last_run'] = $run72;
     $l[0]['last_result'] = ['total' => 4, 'done' => 3, 'failed' => 1, 'warnings' => 0, 'skipped' => 0, 'finished_at' => $ago(71)];
     return $l;
 });
 $cs = $codes();
-ok(in_array('overdue:job_h', $cs, true) && in_array('failed:job_h:' . $ago(72), $cs, true), 'lịch quá giờ chưa chạy + lượt lỗi: ' . json_encode($cs));
+ok(in_array('overdue:job_h', $cs, true) && in_array('failed:job_h:' . $run72, $cs, true), 'lịch quá giờ chưa chạy + lượt lỗi: ' . json_encode($cs));
 WNBStorage::update('settings', fn($s) => array_merge($s, ['min_free_gb' => 10000]));
 ok((bool)preg_grep('/^disk:/', $codes()), 'ổ đĩa thiếu chỗ');
 $st = call('admin', 'admin', ['action' => 'state'])['data'];

@@ -423,7 +423,7 @@ final class WNBApi
             if (in_array($t['status'], ['pending', 'running'], true)) {
                 $running++;
             }
-            if ($t['status'] === 'failed' && $t['created_at'] >= $dayAgo) {
+            if ($t['status'] === 'failed' && empty($t['retried_by']) && $t['created_at'] >= $dayAgo) {
                 $failed24++;
             }
             if (count($queue) < 200) {
@@ -1011,6 +1011,7 @@ final class WNBApi
         WNBStorage::update('settings', fn($s) => array_merge(WNBStorage::defaultSettings(), $s, [
             'local_backup_root' => $root,
             'max_concurrent_tasks' => max(1, min(8, (int)($p['max_concurrent_tasks'] ?? 2))),
+            'job_retry_minutes' => max(0, min(720, (int)($p['job_retry_minutes'] ?? 30))),
             'bwlimit' => $bw,
             'nice_level' => max(0, min(19, (int)($p['nice_level'] ?? 19))),
             'default_retention' => max(1, min(365, (int)($p['default_retention'] ?? 7))),
