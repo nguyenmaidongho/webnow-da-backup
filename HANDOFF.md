@@ -44,6 +44,8 @@ Lịch có 2 chế độ (`filter_mode`, 2.4.0 — người dùng yêu cầu th�
   (e) Form lịch: `keepSpan` ước tính bản cũ nhất lùi bao nhiêu ngày (tính cả kỳ hiện tại; tháng = 30 ngày), bảng lịch hiện "lùi ~a–b ngày".
   Phần Linux (rclone copy manifest, restic `**`, rsync mẫu không neo, cron dọn) CHƯA chạy trên DA thật. Test `tests/api_test11.php`, tổng 406/406 trên PHP 7.4 và 8.5.
 
+- 2.5.1: `install.sh` ghi sha256 của `bin/wnb_exec.c` vào `bin/wnb_exec.srchash` mỗi lần biên dịch xong. gcc hỏng (vd thiếu cc1 trên control) mà helper cũ còn (root, setuid): dấu khớp → dùng tiếp (HELPER_OK=2); chưa có dấu (cài trước 2.5.1) → dùng tạm, báo nên sửa gcc (3); dấu khác → báo phải biên dịch lại. Trước đây báo nhầm "ENGINE CHƯA CHẠY" dù `status` in "Helper: sẵn sàng". Đã giả lập 4 trường hợp bằng Git Bash; nhánh biên dịch thành công chưa chạy thật.
+
 ## Đã làm: loại trừ theo reseller (giống JetBackup Resellers Filter)
 - Lịch có `exclude_resellers`, Cài đặt có `settings.exclude_resellers` (áp dụng mọi lịch). Giá trị hợp lệ: tài khoản usertype reseller hoặc admin (`WNBDirectAdmin::isOwnerAccount`).
 - `WNBDirectAdmin::resellerGroup(r)` = chính r + khách usertype user trong users.list của r (với admin: không gồm các reseller, mỗi reseller là nhóm riêng). `WNBEngine::jobTargets` tính động mỗi lần chạy nên khách tạo sau cũng bị loại trừ.

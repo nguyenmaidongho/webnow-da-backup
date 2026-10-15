@@ -35,6 +35,15 @@ chmod 700 "$PLUGIN_DIR/data"
 
 # 2. Helper setuid root (xác định người gọi bằng UID thật).
 #    In nguyên văn lỗi gcc ra stdout vì Plugin Manager của DirectAdmin chỉ hiển thị stdout.
+#    Mỗi lần biên dịch xong thì ghi dấu (sha256) của mã nguồn vào bin/wnb_exec.srchash: lần sau gcc hỏng mà mã nguồn
+#    không đổi thì helper cũ vẫn dùng được, không báo nhầm "engine chưa chạy".
+HELPER="$PLUGIN_DIR/bin/wnb_exec"
+HASH_FILE="$PLUGIN_DIR/bin/wnb_exec.srchash"
+if command -v sha256sum >/dev/null 2>&1; then
+    SRC_HASH=$(sha256sum "$HELPER.c" 2>/dev/null | awk '{print $1}')
+else
+    SRC_HASH=$(cksum "$HELPER.c" 2>/dev/null | awk '{print "cksum-" $1 "-" $2}')
+fi
 if ! command -v gcc >/dev/null 2>&1; then
     echo "[x] Chưa có gcc nên chưa biên dịch được helper."
     echo "    Cài gcc:  yum install -y gcc   (hoặc: apt-get install -y gcc)"
@@ -45,6 +54,11 @@ else
         chmod 4755 "$PLUGIN_DIR/bin/wnb_exec.new"
         mv -f "$PLUGIN_DIR/bin/wnb_exec.new" "$PLUGIN_DIR/bin/wnb_exec"
         HELPER_OK=1
+        if [ -n "$SRC_HASH" ]; then
+            echo "$SRC_HASH" > "$HASH_FILE"
+            chown root:root "$HASH_FILE"
+            chmod 644 "$HASH_FILE"
+        fi
         echo "[+] Đã biên dịch helper."
     else
         echo "[x] Biên dịch helper thất bại. Lỗi của gcc:"
@@ -67,6 +81,21 @@ else
         fi
     fi
     rm -f "$GCC_LOG" "$PLUGIN_DIR/bin/wnb_exec.new"
+fi
+
+# Không biên dịch được: xem helper của lần cài trước (vẫn còn sau khi cập nhật plugin) có dùng tiếp được không.
+# HELPER_OK: 1 = vừa biên dịch, 2 = helper cũ cùng mã nguồn, 3 = helper cũ chưa ghi dấu mã nguồn (cài trước 2.5.1).
+if [ "$HELPER_OK" != "1" ] && [ -x "$HELPER" ] && [ -u "$HELPER" ] && [ "$(stat -c %u "$HELPER" 2>/dev/null)" = "0" ]; then
+    if [ -f "$HASH_FILE" ] && [ -n "$SRC_HASH" ] && [ "$(cat "$HASH_FILE")" = "$SRC_HASH" ]; then
+        HELPER_OK=2
+        echo "[=] Dùng helper đã biên dịch lần trước: mã nguồn bin/wnb_exec.c không đổi nên engine vẫn chạy bình thường."
+    elif [ ! -f "$HASH_FILE" ]; then
+        HELPER_OK=3
+        echo "[!] Dùng tạm helper đã biên dịch lần trước (bản cài này chưa ghi dấu mã nguồn nên không đối chiếu được)."
+        echo "    Mã nguồn helper không đổi từ bản 2.1.0: máy đã cài từ 2.1.0 trở lên thì engine vẫn chạy bình thường."
+    else
+        echo "[x] Helper đang có được biên dịch từ mã nguồn cũ hơn bản này, phải biên dịch lại thì engine mới chạy đúng."
+    fi
 fi
 
 # 3. Thư mục lưu trữ mặc định: user thường không liệt kê được nội dung.
@@ -152,6 +181,11 @@ $PHP -n "$PLUGIN_DIR/daemon/webnowbackup-cli.php" status
 
 if [ "$HELPER_OK" = "1" ]; then
     echo "== Hoàn tất. Mở DirectAdmin > WebNowBackup để bật lịch sao lưu. =="
+elif [ "$HELPER_OK" = "2" ]; then
+    echo "== Hoàn tất, engine chạy bằng helper cũ (mã nguồn không đổi). Nên sửa gcc ở trên để lần sau helper thay đổi thì biên dịch được. =="
+elif [ "$HELPER_OK" = "3" ]; then
+    echo "== Plugin đã cài, engine chạy bằng helper cũ. Sửa gcc ở trên rồi chạy lại bằng root để biên dịch và ghi dấu mã nguồn:"
+    echo "   sh $PLUGIN_DIR/scripts/install.sh"
 else
     echo "== Plugin đã cài nhưng ENGINE CHƯA CHẠY. Sửa lỗi gcc ở trên rồi chạy lại bằng root:"
     echo "   sh $PLUGIN_DIR/scripts/install.sh"

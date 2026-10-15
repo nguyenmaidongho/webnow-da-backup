@@ -2,7 +2,7 @@
 
 Plugin sao lưu và khôi phục cho **DirectAdmin** (giao diện Evolution, sáng/tối), dùng được ở cả ba cấp **Admin, Reseller và User**. Sao lưu lên ổ cứng máy chủ hoặc lên cloud (S3, R2, B2, Google Drive, OneDrive…). Mã hóa và incremental bằng restic, khôi phục được từng file. Song ngữ Tiếng Việt / English.
 
-Phiên bản hiện tại: **2.5.0** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
+Phiên bản hiện tại: **2.5.1** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
 
 ---
 
@@ -108,7 +108,7 @@ Phiên bản hiện tại: **2.5.0** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đ�
    - vô hiệu hóa phần chạy bằng root của plugin VaultBackup cũ nếu máy còn sót.
 4. Mở **DirectAdmin → WebNowBackup → Kho lưu trữ** để thêm kho cloud, rồi vào **Lịch tự động** tạo hoặc bật lịch.
 
-Sau mỗi lần cập nhật mà file `bin/wnb_exec.c` thay đổi, chạy lại lệnh ở bước 3.
+Sau mỗi lần cập nhật mà file `bin/wnb_exec.c` thay đổi, chạy lại lệnh ở bước 3. Nếu gcc trên máy bị hỏng mà `bin/wnb_exec.c` không đổi so với lần biên dịch trước, script dùng tiếp helper cũ và báo rõ (engine vẫn chạy).
 
 ---
 
