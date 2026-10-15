@@ -172,6 +172,14 @@ final class WNBApi
                 [$key, $vars, $ok, $newKey] = self::saveDestination($p);
                 return $done($key, $vars, ['test_ok' => $ok, 'restic_new_key' => $newKey]);
 
+            case 'dest_oauth_start':
+                self::requireAdmin($role);
+                return WNBOAuth::start($str('kind'));
+
+            case 'dest_oauth_finish':
+                self::requireAdmin($role);
+                return WNBOAuth::finish($str('kind'), $str('url'));
+
             case 'dest_restic_key':
                 // Admin xem mật khẩu kho restic để cất giữ ngoài máy chủ (mất mật khẩu = mất toàn bộ bản sao lưu trong kho).
                 self::requireAdmin($role);
@@ -693,6 +701,14 @@ final class WNBApi
             $input = [];
             foreach (WNBRclone::TYPES[$type]['fields'] as $f) {
                 $input[$f] = (string)($p['p_' . $f] ?? '');
+            }
+            // Vừa bấm "Kết nối": token (và drive_id của OneDrive) nằm ở máy chủ, trình duyệt chỉ giữ vé.
+            $ticket = trim((string)($p['oauth_ticket'] ?? ''));
+            if ($ticket !== '' && in_array($type, WNBOAuth::KINDS, true)) {
+                $auth = WNBOAuth::consume($ticket, $type);
+                $rec['account'] = $auth['account'];
+                unset($auth['account']);
+                $input = array_merge($input, $auth);
             }
             $rec['location'] = WNBRclone::locationKey($type, $sub, WNBRclone::buildParams($rec['remote'], $type, $input));
             if ($existing) {

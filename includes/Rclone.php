@@ -723,3 +723,252 @@ final class WNBRestic
         return $records;
     }
 }
+
+/**
+ * Kết nối Google Drive / OneDrive bằng nút bấm, không phải gõ lệnh.
+ * Chạy `rclone authorize` trên máy chủ (dùng app OAuth có sẵn của rclone, không cần đăng ký gì thêm). Trình duyệt của
+ * admin mở trang đăng nhập; sau khi cho phép, nhà cung cấp chuyển về http://127.0.0.1:53682/?code=... và trang đó báo
+ * "không truy cập được" vì cổng này nằm trên máy chủ. Admin dán lại địa chỉ đó, máy chủ tự gọi vào rclone đang chờ,
+ * rclone đổi code lấy token. Token giữ ở máy chủ (vé dùng một lần cho dest_save), không bao giờ gửi về trình duyệt.
+ */
+final class WNBOAuth
+{
+    public const KINDS = ['drive', 'onedrive'];
+    private const PORT = 53682;
+    private const TIMEOUT = 900;
+    private const TICKET_TTL = 3600;
+    /** Trang đăng nhập hợp lệ mà rclone chuyển tới. */
+    private const AUTH_HOSTS = ['accounts.google.com', 'login.microsoftonline.com', 'login.live.com'];
+
+    private static function stateFile(): string
+    {
+        return WNBStorage::path('oauth.json');
+    }
+
+    private static function logFile(): string
+    {
+        return WNBStorage::path('oauth.log');
+    }
+
+    private static function load(): array
+    {
+        $f = self::stateFile();
+        $s = is_file($f) ? json_decode((string)@file_get_contents($f), true) : null;
+        return is_array($s) ? $s : [];
+    }
+
+    private static function save(array $s): void
+    {
+        $old = umask(0077);
+        @file_put_contents(self::stateFile(), json_encode($s, JSON_UNESCAPED_SLASHES));
+        umask($old);
+    }
+
+    /** Bắt đầu: chạy rclone authorize nền, trả về địa chỉ trang đăng nhập của Google/Microsoft. */
+    public static function start(string $kind): array
+    {
+        if (!in_array($kind, self::KINDS, true)) {
+            throw new WNBError('Loại kho không hợp lệ.');
+        }
+        self::stop(true);
+        if (WNB::isPreview()) {
+            $state = rtrim(strtr(base64_encode(random_bytes(16)), '+/', '-_'), '=');
+            self::save(['kind' => $kind, 'state' => $state, 'pid' => 0, 'started' => time()]);
+            $url = $kind === 'drive'
+                ? 'https://accounts.google.com/o/oauth2/auth?client_id=demo&redirect_uri=http%3A%2F%2F127.0.0.1%3A53682%2F&state=' . $state
+                : 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=demo&redirect_uri=http%3A%2F%2Flocalhost%3A53682%2F&state=' . $state;
+            return ['url' => $url];
+        }
+        if (!WNBRclone::installed()) {
+            throw new WNBError('Chưa cài rclone nên không sao lưu lên cloud được.');
+        }
+        $curl = WNBShell::which('curl');
+        if ($curl === '') {
+            throw new WNBError('Máy chủ thiếu curl nên không kết nối được.');
+        }
+        $log = self::logFile();
+        $setsid = WNBShell::which('setsid');
+        $timeout = WNBShell::which('timeout');
+        $cmd = ($setsid !== '' ? escapeshellarg($setsid) . ' ' : '') . ($timeout !== '' ? escapeshellarg($timeout) . ' ' . self::TIMEOUT . ' ' : '')
+            . WNBRclone::cmd('authorize ' . escapeshellarg($kind) . ' --auth-no-open-browser');
+        $old = umask(0077);
+        WNBShell::bash($cmd . ' </dev/null >' . escapeshellarg($log) . ' 2>&1 & echo $!', $out);
+        umask($old);
+        $pid = (int)trim((string)($out[0] ?? ''));
+        self::save(['kind' => $kind, 'pid' => $pid, 'started' => time()]);
+
+        // rclone in ra http://127.0.0.1:53682/auth?state=... rồi chờ.
+        $local = '';
+        $state = '';
+        for ($i = 0; $i < 40 && $local === ''; $i++) {
+            usleep(250000);
+            $txt = (string)@file_get_contents($log);
+            if (preg_match('#http://(?:127\.0\.0\.1|localhost):' . self::PORT . '/auth\?state=([A-Za-z0-9_\-]+)#', $txt, $m)) {
+                $local = $m[0];
+                $state = $m[1];
+            } elseif (stripos($txt, 'address already in use') !== false) {
+                self::stop(true);
+                throw new WNBError('Cổng {port} trên máy chủ đang bận, có thể do một lệnh rclone authorize khác đang chạy. Hãy dừng lệnh đó (Ctrl+C) rồi bấm Kết nối lại.', ['port' => self::PORT]);
+            } elseif (!self::alive($pid)) {
+                self::stop(true);
+                throw new WNBError('rclone authorize dừng bất thường: {detail}', ['detail' => WNBShell::tail(explode("\n", $txt), 2)]);
+            }
+        }
+        if ($local === '') {
+            self::stop(true);
+            throw new WNBError('rclone authorize không phản hồi, hãy thử lại.');
+        }
+        // Trang /auth của rclone chuyển hướng tới trang đăng nhập thật: lấy địa chỉ đó cho trình duyệt.
+        WNBShell::run(escapeshellarg($curl) . " -s -o /dev/null --max-time 10 -w '%{redirect_url}' " . escapeshellarg($local), $out);
+        $url = trim(implode('', $out));
+        if (parse_url($url, PHP_URL_SCHEME) !== 'https' || !in_array((string)parse_url($url, PHP_URL_HOST), self::AUTH_HOSTS, true)) {
+            self::stop(true);
+            throw new WNBError('Không lấy được trang đăng nhập từ rclone, hãy thử lại.');
+        }
+        self::save(['kind' => $kind, 'pid' => $pid, 'state' => $state, 'started' => time()]);
+        return ['url' => $url];
+    }
+
+    /**
+     * Hoàn tất: nhận địa chỉ trang "không truy cập được" admin dán vào, chuyển code cho rclone đang chờ, nhận token.
+     * @return array{ticket:string,account:string}
+     */
+    public static function finish(string $kind, string $pasted): array
+    {
+        $s = self::load();
+        if (($s['kind'] ?? '') !== $kind || empty($s['state']) || time() - (int)($s['started'] ?? 0) > self::TIMEOUT) {
+            throw new WNBError('Phiên kết nối đã hết hạn, hãy bấm Kết nối lại.');
+        }
+        $q = self::parseRedirect($pasted);
+        if (!hash_equals((string)$s['state'], $q['state'])) {
+            throw new WNBError('Địa chỉ này không thuộc lần kết nối hiện tại. Hãy bấm Kết nối lại rồi dán địa chỉ mới nhất.');
+        }
+        if (WNB::isPreview()) {
+            $token = (string)json_encode(['access_token' => 'demo-' . bin2hex(random_bytes(6)), 'token_type' => 'Bearer', 'refresh_token' => 'demo-refresh', 'expiry' => gmdate('Y-m-d\TH:i:s\Z', time() + 3600)]);
+            $extra = $kind === 'onedrive' ? ['drive_id' => 'b!demo' . bin2hex(random_bytes(4)), 'drive_type' => 'personal'] : [];
+            $account = $kind === 'drive' ? 'demo@gmail.com' : 'Demo OneDrive';
+        } else {
+            if (!self::alive((int)($s['pid'] ?? 0))) {
+                throw new WNBError('Phiên kết nối đã hết hạn, hãy bấm Kết nối lại.');
+            }
+            WNBShell::run(escapeshellarg(WNBShell::which('curl')) . ' -s -o /dev/null --max-time 30 ' . escapeshellarg('http://127.0.0.1:' . self::PORT . '/?' . http_build_query($q['params'])), $out);
+            $token = '';
+            for ($i = 0; $i < 60 && $token === ''; $i++) {
+                $token = self::extractToken((string)@file_get_contents(self::logFile()));
+                if ($token === '') {
+                    if (!self::alive((int)$s['pid'])) {
+                        break;
+                    }
+                    usleep(500000);
+                }
+            }
+            if ($token === '') {
+                $detail = WNBShell::tail(explode("\n", (string)@file_get_contents(self::logFile())), 2);
+                self::stop(true);
+                throw new WNBError('Không nhận được token từ rclone: {detail}', ['detail' => $detail]);
+            }
+            [$account, $extra] = self::accountInfo($kind, (string)(json_decode($token, true)['access_token'] ?? ''));
+        }
+        self::stop(true);
+        $ticket = bin2hex(random_bytes(12));
+        self::save(['ticket' => $ticket, 'kind' => $kind, 'token' => $token, 'extra' => $extra, 'account' => $account, 'expires' => time() + self::TICKET_TTL]);
+        return ['ticket' => $ticket, 'account' => $account];
+    }
+
+    /** Lấy token + tham số kèm theo của vé (dùng một lần). */
+    public static function consume(string $ticket, string $kind): array
+    {
+        $s = self::load();
+        if ($ticket === '' || empty($s['ticket']) || !hash_equals((string)$s['ticket'], $ticket) || ($s['kind'] ?? '') !== $kind || time() > (int)($s['expires'] ?? 0)) {
+            throw new WNBError('Phiên kết nối đã hết hạn, hãy bấm Kết nối lại.');
+        }
+        @unlink(self::stateFile());
+        return ['token' => (string)$s['token'], 'account' => (string)($s['account'] ?? '')] + (array)($s['extra'] ?? []);
+    }
+
+    /**
+     * Đọc địa chỉ admin dán vào (cả URL hoặc chỉ phần code=...&state=...). Chỉ giữ tham số có tên đơn giản để gửi lại cho rclone.
+     * @return array{state:string,params:array}
+     */
+    public static function parseRedirect(string $pasted): array
+    {
+        $pasted = trim($pasted);
+        $query = (string)(parse_url($pasted, PHP_URL_QUERY) ?? '');
+        if ($query === '' && strpos($pasted, '=') !== false && strpos($pasted, '://') === false) {
+            $query = ltrim($pasted, '?');
+        }
+        parse_str($query, $all);
+        $params = [];
+        foreach ($all as $k => $v) {
+            if (is_string($v) && preg_match('/^[a-z_]{1,40}$/', (string)$k) && strlen($v) <= 4096) {
+                $params[$k] = $v;
+            }
+        }
+        if (isset($params['error'])) {
+            throw new WNBError('Chưa được cấp quyền: {detail}', ['detail' => $params['error_description'] ?? $params['error']]);
+        }
+        if (($params['code'] ?? '') === '' || ($params['state'] ?? '') === '') {
+            throw new WNBError('Địa chỉ dán vào không có mã xác nhận. Hãy copy toàn bộ thanh địa chỉ của trang hiện ra sau khi bấm Cho phép (bắt đầu bằng http://127.0.0.1:53682/ hoặc http://localhost:53682/).');
+        }
+        return ['state' => $params['state'], 'params' => $params];
+    }
+
+    /** Token JSON trong output của rclone authorize (giữa "--->" và "<---"; có bản in dạng base64 của {"token":"..."}). */
+    public static function extractToken(string $txt): string
+    {
+        if (!preg_match('/--->\s*(.+?)\s*<---/s', $txt, $m)) {
+            return '';
+        }
+        $raw = trim($m[1]);
+        $j = json_decode($raw, true);
+        if (!is_array($j)) {
+            $dec = base64_decode(strtr($raw, '-_', '+/'), true);
+            $j = $dec !== false ? json_decode($dec, true) : null;
+            if (is_array($j) && isset($j['token']) && is_string($j['token'])) {
+                $j = json_decode($j['token'], true);
+            }
+        }
+        if (!is_array($j) || empty($j['access_token'])) {
+            return '';
+        }
+        return (string)json_encode($j, JSON_UNESCAPED_SLASHES);
+    }
+
+    /** Tên tài khoản để hiển thị; OneDrive cần thêm drive_id/drive_type cho rclone. */
+    private static function accountInfo(string $kind, string $access): array
+    {
+        $url = $kind === 'drive' ? 'https://www.googleapis.com/drive/v3/about?fields=user' : 'https://graph.microsoft.com/v1.0/me/drive';
+        // Token đi qua stdin (-K -) để không lộ trên danh sách tiến trình.
+        $cfg = 'url = "' . $url . '"' . "\n" . 'header = "Authorization: Bearer ' . str_replace(['"', '\\', "\n", "\r"], '', $access) . '"' . "\nmax-time = 20\nsilent\n";
+        WNBShell::runWithInput(escapeshellarg(WNBShell::which('curl')) . ' -K -', $cfg, $out);
+        $j = json_decode(implode("\n", $out), true);
+        if ($kind === 'drive') {
+            return [(string)($j['user']['emailAddress'] ?? ''), []];
+        }
+        if (empty($j['id'])) {
+            throw new WNBError('Đã đăng nhập nhưng không đọc được OneDrive của tài khoản này: {detail}', ['detail' => (string)($j['error']['message'] ?? substr(implode(' ', $out), 0, 160))]);
+        }
+        $name = (string)($j['owner']['user']['email'] ?? $j['owner']['user']['displayName'] ?? '');
+        return [$name, ['drive_id' => (string)$j['id'], 'drive_type' => (string)($j['driveType'] ?? 'personal')]];
+    }
+
+    private static function alive(int $pid): bool
+    {
+        return $pid > 0 && strpos((string)@file_get_contents('/proc/' . $pid . '/cmdline'), 'authorize') !== false;
+    }
+
+    /** Dừng rclone authorize đang chờ (nếu có) và xóa log. $all = xóa luôn vé chưa dùng. */
+    public static function stop(bool $all = false): void
+    {
+        $s = self::load();
+        $pid = (int)($s['pid'] ?? 0);
+        if (!WNB::isPreview() && self::alive($pid)) {
+            // timeout chuyển tín hiệu cho rclone con.
+            WNBShell::run('kill ' . $pid);
+        }
+        @unlink(self::logFile());
+        if ($all || empty($s['ticket'])) {
+            @unlink(self::stateFile());
+        }
+    }
+}

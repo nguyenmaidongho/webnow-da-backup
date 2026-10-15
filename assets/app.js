@@ -928,7 +928,7 @@
     function viewDestinations() {
         var rows = S.destinations.map(function (d) {
             var ty = DEST_TYPES[d.type] || { label: d.type, icon: 'cloud' };
-            var where = d.type === 'local' ? d.path : d.subpath;
+            var where = d.type === 'local' ? d.path : d.subpath + (d.account ? ' · ' + d.account : '');
             var mt = d.restic_maint || {};
             var maint = d.format === 'restic' ? (mt.prune_ts ? '<div class="cell-sub">' + esc(t('Dọn kho {when}', { when: fmtRel(new Date(mt.prune_ts * 1000).toISOString().slice(0, 19).replace('T', ' ')) })) + '</div>' : '') +
                 ((mt.check_ok === false || mt.prune_ok === false) ? ' <span class="badge bad" title="' + esc(mt.check_msg || mt.prune_msg || '') + '">' + esc(t('Kho có lỗi')) + '</span>' : '') : '';
@@ -970,6 +970,67 @@
             if (navigator.clipboard) navigator.clipboard.writeText(v).then(function () { toast(t('Đã chép mật khẩu')); });
         };
     }
+    /** Kho đăng nhập bằng tài khoản: có nút Kết nối, các trường token chuyển vào mục "nhập thủ công". */
+    var OAUTH_TYPES = { drive: 'Google', onedrive: 'Microsoft' };
+
+    function oauthBox(ty, d, dest) {
+        var connected = dest && d.type === ty && d.has_token;
+        return '<div class="field full" data-oauth><label>' + esc(t('Tài khoản')) + '</label><div class="oauth-box">' +
+            '<div class="row-wrap"><span data-oauth-status>' + (connected
+                ? '<span class="badge ok">' + ic('check') + esc(t('Đã kết nối')) + '</span>' + (d.account ? ' <span class="muted small">' + esc(d.account) + '</span>' : '')
+                : '<span class="badge">' + esc(t('Chưa kết nối')) + '</span>') + '</span>' +
+            '<button type="button" class="btn btn-sm' + (connected ? '' : ' btn-primary') + ' right" data-oauth-start>' + ic('cloud') + esc(connected ? t('Kết nối tài khoản khác') : t('Kết nối {name}', { name: DEST_TYPES[ty].label })) + '</button></div>' +
+            '<div class="oauth-step" data-oauth-step hidden><ol>' +
+            '<li>' + esc(t('Đăng nhập {provider} trong tab vừa mở rồi bấm Cho phép.', { provider: OAUTH_TYPES[ty] })) + '</li>' +
+            '<li>' + esc(t('Tab đó sẽ báo "Không thể truy cập trang web này". Đây là bình thường.')) + '</li>' +
+            '<li>' + esc(t('Copy toàn bộ thanh địa chỉ của tab đó và dán vào ô dưới đây.')) + '</li></ol>' +
+            '<div class="row"><input class="input mono" data-oauth-url autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:53682/?state=…&code=…"><button type="button" class="btn btn-primary" data-oauth-finish>' + esc(t('Xác nhận')) + '</button></div>' +
+            '<div class="hint">' + esc(t('Tab đăng nhập không tự mở?')) + ' <a href="#" target="_blank" rel="noopener noreferrer" data-oauth-link>' + esc(t('Mở trang đăng nhập')) + '</a></div></div>' +
+            '</div><input type="hidden" name="oauth_ticket" value=""></div>';
+    }
+
+    function bindOauth(box, ty) {
+        var el = function (s) { return box.querySelector(s); };
+        var step = el('[data-oauth-step]'), urlInput = el('[data-oauth-url]');
+        el('[data-oauth-start]').onclick = function (e) {
+            var btn = e.currentTarget;
+            // Mở tab ngay trong lúc bấm để trình duyệt không chặn popup, rồi mới trỏ tới trang đăng nhập.
+            var w = window.open('', '_blank');
+            if (w) w.opener = null;
+            btn.classList.add('loading');
+            api('dest_oauth_start', { kind: ty }).then(function (r) {
+                btn.classList.remove('loading');
+                el('[data-oauth-link]').href = r.url;
+                if (w) w.location.href = r.url;
+                step.hidden = false;
+                urlInput.value = '';
+                urlInput.focus();
+            }, function (err) {
+                btn.classList.remove('loading');
+                if (w) w.close();
+                toast(err.message, true);
+            });
+        };
+        var finish = function () {
+            var v = urlInput.value.trim();
+            if (!v) return;
+            var btn = el('[data-oauth-finish]');
+            btn.classList.add('loading');
+            api('dest_oauth_finish', { kind: ty, url: v }).then(function (r) {
+                btn.classList.remove('loading');
+                box.querySelector('[name="oauth_ticket"]').value = r.ticket;
+                el('[data-oauth-status]').innerHTML = '<span class="badge ok">' + ic('check') + esc(t('Đã kết nối')) + '</span>' + (r.account ? ' <span class="muted small">' + esc(r.account) + '</span>' : '') +
+                    ' <span class="muted small">' + esc(t('Bấm "Lưu & kiểm tra kết nối" để hoàn tất.')) + '</span>';
+                var start = el('[data-oauth-start]');
+                start.classList.remove('btn-primary');
+                start.innerHTML = ic('cloud') + esc(t('Kết nối tài khoản khác'));
+                step.hidden = true;
+            }, function (err) { btn.classList.remove('loading'); toast(err.message, true); });
+        };
+        el('[data-oauth-finish]').onclick = finish;
+        urlInput.addEventListener('paste', function () { setTimeout(finish, 0); });
+        urlInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); finish(); } });
+    }
     function formatLabel(d) {
         if (d.type === 'local') return t('Incremental (hardlink)');
         if (d.format === 'restic') return t('Incremental (restic)');
@@ -1002,7 +1063,7 @@
             var canArchive = ARCHIVE_TYPES.indexOf(ty) !== -1;
             form.format.querySelector('option[value="archive"]').disabled = !canArchive;
             if (!canArchive && form.format.value === 'archive') form.format.value = S.engine.restic ? 'restic' : 'folder';
-            remoteBox.innerHTML = (DEST_FIELDS[ty] || []).map(function (f) {
+            var fields = (DEST_FIELDS[ty] || []).map(function (f) {
                 var name = 'p_' + f[0], kind = f[2] || '', ph = t(f[3] || ''), val = (dest && d.type === ty && d.params && d.params[f[0]]) || '';
                 var savedSecret = dest && d['has_' + f[0]];
                 var input;
@@ -1015,6 +1076,12 @@
                 }
                 return '<div class="field' + (kind === 'secret-area' ? ' full' : '') + '"><label>' + esc(t(f[1])) + '</label>' + input + (kind === 'secret-area' ? '<div class="hint">' + esc(ph) + '</div>' : '') + '</div>';
             }).join('');
+            if (OAUTH_TYPES[ty]) {
+                remoteBox.innerHTML = oauthBox(ty, d, dest) + '<details class="adv field full"><summary>' + esc(t('Nhập token thủ công (rclone authorize)')) + '</summary><div class="form-grid">' + fields + '</div></details>';
+                bindOauth(remoteBox.querySelector('[data-oauth]'), ty);
+            } else {
+                remoteBox.innerHTML = fields;
+            }
             syncFormat();
         };
         var syncFormat = function () {
@@ -1035,10 +1102,15 @@
             var data = formData(form);
             data.type = form.type.value;
             data.format = form.format.value;
+            if (OAUTH_TYPES[data.type] && !data.oauth_ticket && !(data.p_token || '').trim() && !(dest && d.type === data.type && d.has_token)) {
+                toast(t('Hãy bấm "Kết nối {name}" trước khi lưu.', { name: DEST_TYPES[data.type].label }), true);
+                return;
+            }
             var btn = e.currentTarget;
             btn.classList.add('loading');
             api('dest_save', data).then(function (res) {
                 btn.classList.remove('loading');
+                if (form.oauth_ticket) form.oauth_ticket.value = ''; // vé chỉ dùng được một lần
                 toast(res.message, !res.test_ok);
                 render();
                 if (res.test_ok) m.close();

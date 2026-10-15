@@ -442,5 +442,18 @@ window.WNB_EN = {
     'Tài khoản chưa có một số subdomain / domain pointer của bản sao lưu': 'The account is missing some subdomains / domain pointers from this backup',
     'File vẫn được khôi phục, nhưng các mục này chỉ chạy lại sau khi tạo lại trong DirectAdmin ({list}).': 'Files are still restored, but these only work again after you recreate them in DirectAdmin ({list}).',
     'Tên máy chủ trong thông báo': 'Server name in notifications',
-    'Hiện ở đầu mọi tin Telegram và tiêu đề email để phân biệt khi nhiều máy chủ gửi về cùng một nơi. Để trống thì dùng hostname {host}.': 'Shown at the top of every Telegram message and in email subjects, to tell servers apart when several report to the same place. Leave empty to use the hostname {host}.'
+    'Hiện ở đầu mọi tin Telegram và tiêu đề email để phân biệt khi nhiều máy chủ gửi về cùng một nơi. Để trống thì dùng hostname {host}.': 'Shown at the top of every Telegram message and in email subjects, to tell servers apart when several report to the same place. Leave empty to use the hostname {host}.',
+    'Đã kết nối': 'Connected',
+    'Chưa kết nối': 'Not connected',
+    'Kết nối tài khoản khác': 'Connect another account',
+    'Kết nối {name}': 'Connect {name}',
+    'Đăng nhập {provider} trong tab vừa mở rồi bấm Cho phép.': 'Sign in to {provider} in the tab that just opened, then click Allow.',
+    'Tab đó sẽ báo "Không thể truy cập trang web này". Đây là bình thường.': 'That tab will then say "This site can\'t be reached". This is expected.',
+    'Copy toàn bộ thanh địa chỉ của tab đó và dán vào ô dưới đây.': 'Copy the whole address bar of that tab and paste it below.',
+    'Xác nhận': 'Confirm',
+    'Tab đăng nhập không tự mở?': 'Sign-in tab did not open?',
+    'Mở trang đăng nhập': 'Open the sign-in page',
+    'Bấm "Lưu & kiểm tra kết nối" để hoàn tất.': 'Click "Save & test connection" to finish.',
+    'Nhập token thủ công (rclone authorize)': 'Enter a token manually (rclone authorize)',
+    'Hãy bấm "Kết nối {name}" trước khi lưu.': 'Click "Connect {name}" before saving.'
 };
