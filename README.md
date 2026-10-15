@@ -2,7 +2,7 @@
 
 Plugin sao lưu và khôi phục cho **DirectAdmin** (giao diện Evolution, sáng/tối), dùng được ở cả ba cấp **Admin, Reseller và User**. Sao lưu lên ổ cứng máy chủ hoặc lên cloud (S3, R2, B2, Google Drive, OneDrive…). Mã hóa và incremental bằng restic, khôi phục được từng file. Song ngữ Tiếng Việt / English.
 
-Phiên bản hiện tại: **2.4.11** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
+Phiên bản hiện tại: **2.4.12** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
 
 ---
 
@@ -22,6 +22,7 @@ Phiên bản hiện tại: **2.4.11** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đ
 - **Thư mục đích mặc định** là `WebNowBackup/<tên máy chủ>`, nên nhiều máy chủ dùng chung một kho mà không đè lên nhau. Khoảng trắng hay ký tự ẩn dính vào khi dán được tự bỏ.
 - **Kho restic**: mỗi kho có mật khẩu riêng (plugin tự tạo, admin xem và cất giữ được). **Mất mật khẩu là mất toàn bộ bản sao lưu trong kho.** Kho tự bảo trì: prune mỗi ngày, check mỗi tuần. Có nút **"Quét lại kho"** để nạp lại danh sách bản sao lưu sau khi cài lại máy chủ.
 - Sửa kho mà vị trí thay đổi thì plugin tự gỡ các bản cũ khỏi danh sách (không xóa dữ liệu ở vị trí cũ), tránh danh sách trỏ tới bản không còn.
+- **Tài khoản nhiều database dump nhanh**: database được `mysqldump` song song (4 luồng). Với kho restic, các database nhỏ được gom theo lô, mỗi lô một snapshot, thay vì mỗi database một lần gọi restic. Database lớn vẫn dump thẳng vào restic. Tài khoản 1200 database không còn mất hàng giờ.
 - Giới hạn băng thông tải lên (`bwlimit`); tiến trình sao lưu chạy với `nice`/`ionice` để không làm chậm web của khách.
 
 ### Lịch tự động
@@ -140,7 +141,7 @@ php -n tests/seed.php && php -S 127.0.0.1:8088 router.php
 
 Mở `http://127.0.0.1:8088/?role=admin` (hoặc `reseller`, `user`). Thêm `&theme=dark` để xem giao diện tối, `&iframe=flex` để giả lập khung của DirectAdmin.
 
-Chạy test (353 kiểm tra, PHP 7.4 và 8.5, xem thêm [tests/README.md](tests/README.md)):
+Chạy test (362 kiểm tra, PHP 7.4 và 8.5, xem thêm [tests/README.md](tests/README.md)):
 
 ```bash
 rm -rf data && php -n tests/api_test.php
