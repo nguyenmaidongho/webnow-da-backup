@@ -211,6 +211,7 @@ return [
     'Tài khoản chưa có domain pointer {list}. Tạo lại pointer trong DirectAdmin để các tên miền này trỏ về website.' => 'The account does not have the domain pointers {list}. Recreate them in DirectAdmin so these domains point to the website.',
     'Máy chủ thiếu curl nên không kết nối được.' => 'curl is missing on the server, so the connection cannot be made.',
     'Cổng {port} trên máy chủ đang bận, có thể do một lệnh rclone authorize khác đang chạy. Hãy dừng lệnh đó (Ctrl+C) rồi bấm Kết nối lại.' => 'Port {port} on the server is busy, probably because another rclone authorize command is running. Stop it (Ctrl+C), then click Connect again.',
+    'Cổng {port} trên máy chủ đang bị một chương trình khác dùng nên không kết nối được. Kiểm tra bằng lệnh: ss -ltnp | grep {port}' => 'Port {port} on the server is used by another program, so the connection cannot be made. Check with: ss -ltnp | grep {port}',
     'rclone authorize dừng bất thường: {detail}' => 'rclone authorize stopped unexpectedly: {detail}',
     'rclone authorize không phản hồi, hãy thử lại.' => 'rclone authorize did not respond, please try again.',
     'Không lấy được trang đăng nhập từ rclone, hãy thử lại.' => 'Could not get the sign-in page from rclone, please try again.',

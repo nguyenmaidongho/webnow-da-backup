@@ -786,6 +786,7 @@ final class WNBOAuth
         if ($curl === '') {
             throw new WNBError('Máy chủ thiếu curl nên không kết nối được.');
         }
+        self::freePort();
         $log = self::logFile();
         $setsid = WNBShell::which('setsid');
         $timeout = WNBShell::which('timeout');
@@ -950,6 +951,62 @@ final class WNBOAuth
         }
         $name = (string)($j['owner']['user']['email'] ?? $j['owner']['user']['displayName'] ?? '');
         return [$name, ['drive_id' => (string)$j['id'], 'drive_type' => (string)($j['driveType'] ?? 'personal')]];
+    }
+
+    /**
+     * Dừng mọi `rclone authorize` còn sót (lần bấm trước, hoặc admin chạy tay trong terminal rồi bỏ đó) và đợi cổng trống.
+     * Cổng vẫn bị chương trình khác giữ thì báo lỗi.
+     */
+    private static function freePort(): void
+    {
+        $pids = self::strayPids();
+        if ($pids) {
+            // Lệnh bị Ctrl+Z (Stopped) chỉ nhận TERM sau khi được CONT.
+            WNBShell::run('kill -TERM ' . implode(' ', $pids) . '; kill -CONT ' . implode(' ', $pids));
+        }
+        for ($i = 0; $i < 20 && (self::strayPids() || self::portListening()); $i++) {
+            usleep(250000);
+            if ($i === 11 && ($left = self::strayPids())) {
+                WNBShell::run('kill -9 ' . implode(' ', $left));
+            }
+        }
+        if (self::portListening()) {
+            throw new WNBError('Cổng {port} trên máy chủ đang bị một chương trình khác dùng nên không kết nối được. Kiểm tra bằng lệnh: ss -ltnp | grep {port}', ['port' => self::PORT]);
+        }
+    }
+
+    /** @return int[] tiến trình rclone authorize (kể cả tiến trình timeout bọc ngoài) */
+    private static function strayPids(): array
+    {
+        $pids = [];
+        foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $f) {
+            $args = explode("\0", trim((string)@file_get_contents($f), "\0"));
+            $pid = (int)basename(dirname($f));
+            if ($pid === getmypid() || !in_array('authorize', $args, true)) {
+                continue;
+            }
+            foreach ($args as $a) {
+                if (basename($a) === 'rclone') {
+                    $pids[] = $pid;
+                    break;
+                }
+            }
+        }
+        return $pids;
+    }
+
+    private static function portListening(): bool
+    {
+        $hex = ':' . strtoupper(dechex(self::PORT));
+        foreach (['/proc/net/tcp', '/proc/net/tcp6'] as $f) {
+            foreach (@file($f) ?: [] as $line) {
+                $c = preg_split('/\s+/', trim($line));
+                if (isset($c[3]) && $c[3] === '0A' && substr($c[1], -strlen($hex)) === $hex) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static function alive(int $pid): bool
