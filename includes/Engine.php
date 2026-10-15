@@ -114,8 +114,11 @@ final class WNBEngine
             $changed = false;
             foreach ($q as &$t) {
                 if (($t['status'] ?? '') === 'running' && (int)($t['pid'] ?? 0) > 0 && !is_dir('/proc/' . (int)$t['pid'])) {
-                    $t['status'] = 'failed';
-                    $t['message'] = WNBLang::msg('Tiến trình bị dừng đột ngột (máy chủ khởi động lại hoặc bị kill).');
+                    $t['status'] = !empty($t['cancel_by']) ? 'cancelled' : 'failed';
+                    $t['message'] = !empty($t['cancel_by'])
+                        ? WNBLang::msg('Đã dừng bởi {who}.', ['who' => $t['cancel_by']])
+                        : WNBLang::msg('Tiến trình bị dừng đột ngột (máy chủ khởi động lại hoặc bị kill).');
+                    @unlink(self::cancelFlag($t['id']));
                     $t['finished_at'] = WNB::now();
                     $changed = true;
                     if (!empty($t['job_id'])) {
@@ -134,7 +137,16 @@ final class WNBEngine
     {
         $id = $task['id'];
         WNBLang::set($task['lang'] ?? (string)WNBStorage::settings()['language']);
+        $flag = self::cancelFlag($id);
+        WNBShell::$guard = function () use ($flag) {
+            if (is_file($flag)) {
+                // Chỉ ném một lần: các lệnh dọn bản dở dang sau đó vẫn phải chạy được.
+                WNBShell::$guard = null;
+                throw new WNBCancelled();
+            }
+        };
         try {
+            WNBShell::checkpoint();
             switch ($task['type']) {
                 case 'backup':
                 case 'snapshot':
@@ -164,6 +176,13 @@ final class WNBEngine
             }
             self::setTask($id, ['status' => 'completed', 'progress' => 100, 'message' => $res['message'], 'warnings' => count($warn), 'finished_at' => WNB::now()]);
             WNBStorage::log($id, wnb_t('HOÀN TẤT') . ': ' . WNBLang::render($res['message']));
+        } catch (WNBCancelled $e) {
+            $by = (string)(self::findTask($id)['cancel_by'] ?? '');
+            $msg = $task['type'] === 'restore'
+                ? WNBLang::msg('Đã dừng bởi {who}. Dữ liệu có thể mới được khôi phục một phần, hãy khôi phục lại nếu cần.', ['who' => $by])
+                : WNBLang::msg('Đã dừng bởi {who}.', ['who' => $by]);
+            WNBStorage::log($id, wnb_t('ĐÃ DỪNG') . ': ' . WNBLang::render($msg));
+            self::setTask($id, ['status' => 'cancelled', 'message' => $msg, 'finished_at' => WNB::now()]);
         } catch (Throwable $e) {
             $msg = $e instanceof WNBError ? $e->msg() : WNBLang::msg('{detail}', ['detail' => $e->getMessage()]);
             WNBStorage::log($id, wnb_t('LỖI') . ': ' . $e->getMessage());
@@ -172,6 +191,9 @@ final class WNBEngine
             if (empty($task['job_id'])) {
                 self::notifyFailure($task, $msg);
             }
+        } finally {
+            WNBShell::$guard = null;
+            @unlink($flag);
         }
         if (!empty($task['job_id'])) {
             self::maybeJobReport($task['job_id']);
@@ -191,8 +213,171 @@ final class WNBEngine
         });
     }
 
+    public static function findTask(string $id): ?array
+    {
+        foreach (WNBStorage::read('queue') as $t) {
+            if (($t['id'] ?? '') === $id) {
+                return $t;
+            }
+        }
+        return null;
+    }
+
+    /** File cờ "yêu cầu dừng" của tác vụ (worker kiểm tra giữa các lệnh mà không phải đọc cả hàng đợi). */
+    public static function cancelFlag(string $id): string
+    {
+        return WNBStorage::path('tmp/cancel_' . preg_replace('/[^a-z0-9_\-]/i', '', $id));
+    }
+
+    /**
+     * Dừng một tác vụ. Đang chờ: hủy ngay. Đang chạy: đặt cờ để worker không chạy lệnh kế tiếp,
+     * rồi dừng các tiến trình con (rsync, mysqldump, rclone, restic...) để lệnh hiện tại kết thúc ngay;
+     * worker tự dọn bản dở dang (như khi lỗi) rồi chuyển sang tác vụ khác trong hàng đợi.
+     * @return string 'cancelled' (đã hủy) | 'stopping' (đang dừng) | '' (tác vụ đã xong hoặc đang dừng)
+     */
+    public static function cancelTask(string $id, string $by): string
+    {
+        $result = '';
+        $task = null;
+        WNBStorage::update('queue', function ($q) use ($id, $by, &$result, &$task) {
+            foreach ($q as &$t) {
+                if (($t['id'] ?? '') !== $id) {
+                    continue;
+                }
+                $task = $t;
+                if ($t['status'] === 'pending') {
+                    $t['status'] = 'cancelled';
+                    $t['cancel_by'] = $by;
+                    $t['message'] = WNBLang::msg('Đã dừng bởi {who}.', ['who' => $by]);
+                    $t['finished_at'] = WNB::now();
+                    $result = 'cancelled';
+                    return $q;
+                }
+                if ($t['status'] === 'running' && $t['type'] !== 'delete' && empty($t['cancel_by'])) {
+                    $t['cancel_by'] = $by;
+                    $t['message'] = WNBLang::msg('Đang dừng…');
+                    $result = 'stopping';
+                    return $q;
+                }
+                return null;
+            }
+            return null;
+        });
+        if (!$task) {
+            throw new WNBError('Không tìm thấy tác vụ.');
+        }
+        if ($result === '' && $task['status'] === 'running' && $task['type'] === 'delete') {
+            throw new WNBError('Tác vụ xóa đang chạy không dừng giữa chừng được (bản sao lưu sẽ hỏng một nửa). Hãy đợi nó xong.');
+        }
+        if ($result === 'cancelled') {
+            WNBStorage::log($id, wnb_t('ĐÃ DỪNG') . ': ' . wnb_t('Đã dừng bởi {who}.', ['who' => $by]));
+            if (!empty($task['job_id'])) {
+                self::maybeJobReport($task['job_id']);
+            }
+        } elseif ($result === 'stopping') {
+            WNBStorage::log($id, wnb_t('{who} yêu cầu dừng tác vụ.', ['who' => $by]));
+            @touch(self::cancelFlag($id));
+            @chmod(self::cancelFlag($id), 0600);
+            self::stopChildren((int)($task['pid'] ?? 0));
+        }
+        return $result;
+    }
+
+    /** Dừng mọi tác vụ đang chờ/đang chạy (chỉ của một lịch nếu có $jobId). Hủy tác vụ chờ trước để worker không nhận tiếp. */
+    public static function cancelAll(string $by, string $jobId = ''): int
+    {
+        $ids = ['pending' => [], 'running' => []];
+        foreach (WNBStorage::read('queue') as $t) {
+            if (!isset($ids[$t['status']]) || ($jobId !== '' && ($t['job_id'] ?? '') !== $jobId)) {
+                continue;
+            }
+            if ($t['status'] === 'running' && ($t['type'] === 'delete' || !empty($t['cancel_by']))) {
+                continue;
+            }
+            $ids[$t['status']][] = $t['id'];
+        }
+        $n = 0;
+        foreach (array_merge($ids['pending'], $ids['running']) as $id) {
+            try {
+                $n += self::cancelTask($id, $by) !== '' ? 1 : 0;
+            } catch (WNBError $e) {
+                // tác vụ vừa xong trong lúc đang dừng các tác vụ khác: bỏ qua
+            }
+        }
+        return $n;
+    }
+
+    /**
+     * Dừng các tiến trình con của worker $pid (KHÔNG dừng chính worker): TERM, đợi tối đa 5 giây rồi KILL.
+     * Worker chạy bằng setsid nên mọi lệnh con cùng nhóm tiến trình với nó, kể cả tiến trình mồ côi
+     * của pipeline; thêm cây con theo ppid cho lệnh tự đổi nhóm.
+     */
+    private static function stopChildren(int $pid): void
+    {
+        if ($pid <= 1 || WNB::isPreview() || !is_dir('/proc/' . $pid)) {
+            return;
+        }
+        // Chống PID bị tái sử dụng: chỉ đụng tới tiến trình đúng là worker của plugin.
+        if (strpos((string)@file_get_contents('/proc/' . $pid . '/cmdline'), 'webnowbackup-cli.php') === false) {
+            return;
+        }
+        $procs = self::procTable();
+        $targets = [];
+        if (($procs[$pid]['pgrp'] ?? 0) === $pid) {
+            foreach ($procs as $p => $info) {
+                if ($info['pgrp'] === $pid && $p !== $pid) {
+                    $targets[$p] = true;
+                }
+            }
+        }
+        $todo = [$pid];
+        while ($todo) {
+            $parent = array_pop($todo);
+            foreach ($procs as $p => $info) {
+                if ($info['ppid'] === $parent && $p !== $pid && !isset($targets[$p])) {
+                    $targets[$p] = true;
+                    $todo[] = $p;
+                }
+            }
+        }
+        $targets = array_keys($targets);
+        if (!$targets) {
+            return;
+        }
+        $list = implode(' ', $targets);
+        // Lệnh bị dừng tạm (SIGSTOP) chỉ nhận TERM sau khi được CONT.
+        WNBShell::run('kill -TERM ' . $list . '; kill -CONT ' . $list);
+        for ($i = 0; $i < 25; $i++) {
+            usleep(200000);
+            $procs = self::procTable();
+            $targets = array_values(array_filter($targets, fn($p) => isset($procs[$p]) && $procs[$p]['state'] !== 'Z'));
+            if (!$targets) {
+                return;
+            }
+        }
+        WNBShell::run('kill -KILL ' . implode(' ', $targets));
+    }
+
+    /** @return array<int, array{state:string, ppid:int, pgrp:int}> */
+    private static function procTable(): array
+    {
+        $out = [];
+        foreach (glob('/proc/[0-9]*/stat') ?: [] as $f) {
+            $s = @file_get_contents($f);
+            $end = $s === false ? false : strrpos($s, ')');
+            if ($end === false) {
+                continue;
+            }
+            // Sau "(tên lệnh) ": state ppid pgrp ...
+            $parts = explode(' ', substr($s, $end + 2));
+            $out[(int)substr($f, 6)] = ['state' => $parts[0], 'ppid' => (int)($parts[1] ?? 0), 'pgrp' => (int)($parts[2] ?? 0)];
+        }
+        return $out;
+    }
+
     private static function step(array $task, int $pct, string $key, array $vars = []): void
     {
+        WNBShell::checkpoint();
         WNBStorage::log($task['id'], wnb_t($key, $vars));
         self::setTask($task['id'], ['progress' => $pct, 'message' => WNBLang::msg($key, $vars)]);
     }
@@ -455,10 +640,12 @@ final class WNBEngine
                         }
                     }
                 } catch (WNBError $e) {
-                    if ($e->key === self::DISK_FULL) {
+                    if ($e->key === self::DISK_FULL || $e instanceof WNBCancelled) {
                         throw $e;
                     }
                     $warnings[] = WNBLang::msg('Bỏ qua database: {detail}', ['detail' => $e->getMessage()]);
+                } catch (WNBCancelled $e) {
+                    throw $e;
                 } catch (Throwable $e) {
                     $warnings[] = WNBLang::msg('Bỏ qua database: {detail}', ['detail' => $e->getMessage()]);
                 } finally {
@@ -648,6 +835,8 @@ final class WNBEngine
                             $warnings[] = WNBLang::msg('Dump database {db} thất bại: {detail}', ['db' => $db, 'detail' => self::resticDetail($r, $out)]);
                         }
                     }
+                } catch (WNBCancelled $e) {
+                    throw $e;
                 } catch (Throwable $e) {
                     $warnings[] = WNBLang::msg('Bỏ qua database: {detail}', ['detail' => $e->getMessage()]);
                 } finally {
@@ -2118,7 +2307,7 @@ final class WNBEngine
             if (!$job || empty($job['last_run']) || ($job['reported_run'] ?? '') === $job['last_run']) {
                 return;
             }
-            $stats = ['total' => 0, 'done' => 0, 'failed' => 0, 'warnings' => 0, 'size_mb' => 0.0, 'failures' => []];
+            $stats = ['total' => 0, 'done' => 0, 'failed' => 0, 'cancelled' => 0, 'warnings' => 0, 'size_mb' => 0.0, 'failures' => []];
             foreach (WNBStorage::read('queue') as $t) {
                 if (($t['job_id'] ?? '') !== $jobId || ($t['job_run'] ?? '') !== $job['last_run']) {
                     continue;
@@ -2127,7 +2316,9 @@ final class WNBEngine
                     return; // lượt chạy chưa xong
                 }
                 $stats['total']++;
-                if ($t['status'] === 'failed') {
+                if ($t['status'] === 'cancelled') {
+                    $stats['cancelled']++;
+                } elseif ($t['status'] === 'failed') {
                     $stats['failed']++;
                     $stats['failures'][] = $t['username'] . ': ' . WNBLang::render($t['message']);
                 } else {
@@ -2140,7 +2331,7 @@ final class WNBEngine
                 foreach ($l as &$j) {
                     if ($j['id'] === $jobId) {
                         $j['reported_run'] = $job['last_run'];
-                        $j['last_result'] = ['total' => $stats['total'], 'skipped' => $skipped, 'done' => $stats['done'], 'failed' => $stats['failed'], 'warnings' => $stats['warnings'], 'finished_at' => WNB::now()];
+                        $j['last_result'] = ['total' => $stats['total'], 'skipped' => $skipped, 'done' => $stats['done'], 'failed' => $stats['failed'], 'cancelled' => $stats['cancelled'], 'warnings' => $stats['warnings'], 'finished_at' => WNB::now()];
                     }
                 }
                 return $l;
@@ -2155,6 +2346,9 @@ final class WNBEngine
             $body = '';
             if ($skipped) {
                 $body .= wnb_t('Bỏ qua {n} tài khoản đang có tác vụ chạy.', ['n' => $skipped]) . "\n";
+            }
+            if ($stats['cancelled']) {
+                $body .= wnb_t('Đã dừng {n} tác vụ.', ['n' => $stats['cancelled']]) . "\n";
             }
             if ($stats['warnings']) {
                 $body .= wnb_t('Cảnh báo: {n}', ['n' => $stats['warnings']]) . "\n";

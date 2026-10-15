@@ -457,5 +457,21 @@ window.WNB_EN = {
     'Mở trang đăng nhập': 'Open the sign-in page',
     'Bấm "Lưu & kiểm tra kết nối" để hoàn tất.': 'Click "Save & test connection" to finish.',
     'Nhập token thủ công (rclone authorize)': 'Enter a token manually (rclone authorize)',
-    'Hãy bấm "Kết nối {name}" trước khi lưu.': 'Click "Connect {name}" before saving.'
+    'Hãy bấm "Kết nối {name}" trước khi lưu.': 'Click "Connect {name}" before saving.',
+    'Đang dừng…': 'Stopping…',
+    'Đã dừng': 'Stopped',
+    '{n} đã dừng': '{n} stopped',
+    'Dừng ({n})': 'Stop ({n})',
+    'Dừng': 'Stop',
+    'Dừng tất cả ({n})': 'Stop all ({n})',
+    'Tác vụ đang chờ sẽ được bỏ khỏi hàng đợi.': 'The waiting task will be removed from the queue.',
+    'Dữ liệu có thể mới được khôi phục một phần. Sau khi dừng, hãy khôi phục lại nếu cần.': 'Data may be only partially restored. After stopping, run the restore again if needed.',
+    'Bản sao lưu dở dang sẽ bị xóa, các bản cũ không bị ảnh hưởng.': 'The unfinished backup will be removed; older backups are not affected.',
+    'Lệnh đang chạy sẽ bị dừng ngay.': 'The running command will be stopped right away.',
+    'Dừng tác vụ?': 'Stop this task?',
+    'Dừng mọi tác vụ?': 'Stop all tasks?',
+    'Mọi tác vụ đang chờ và đang chạy sẽ bị dừng (trừ tác vụ xóa đang chạy). Bản sao lưu dở dang sẽ bị xóa.': 'All waiting and running tasks will be stopped (except running delete tasks). Unfinished backups will be removed.',
+    'Dừng tất cả': 'Stop all',
+    'Dừng lượt chạy?': 'Stop this run?',
+    'Dừng {n} tác vụ còn lại của lịch "{job}". Tài khoản đã sao lưu xong vẫn giữ bản sao lưu; lịch vẫn chạy lại vào lần tới.': 'Stop the {n} remaining tasks of schedule "{job}". Accounts already backed up keep their backups; the schedule still runs next time.'
 };

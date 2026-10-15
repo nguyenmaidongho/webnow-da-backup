@@ -72,6 +72,15 @@ class WNBError extends RuntimeException
     }
 }
 
+/** Tác vụ bị người dùng dừng giữa chừng (không tính là lỗi, không gửi cảnh báo). */
+final class WNBCancelled extends WNBError
+{
+    public function __construct()
+    {
+        parent::__construct('Tác vụ đã bị dừng.');
+    }
+}
+
 function wnb_t(string $key, array $vars = []): string
 {
     return WNBLang::t($key, $vars);

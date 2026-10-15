@@ -12,7 +12,7 @@
 
 define('WNB_ID', 'webnowbackup');
 define('WNB_NAME', 'WebNowBackup');
-define('WNB_VERSION', '2.4.8');
+define('WNB_VERSION', '2.4.9');
 define('WNB_ROOT', dirname(__DIR__));
 define('WNB_PLUGIN_DIR', '/usr/local/directadmin/plugins/' . WNB_ID);
 
@@ -153,13 +153,26 @@ final class WNB
  */
 final class WNBShell
 {
+    /** Engine đặt khi đang chạy một tác vụ: ném WNBCancelled nếu tác vụ được yêu cầu dừng. */
+    public static $guard = null;
+
+    /** Điểm dừng: gọi trước và sau mỗi lệnh để tác vụ bị dừng không chạy tiếp lệnh kế. */
+    public static function checkpoint(): void
+    {
+        if (self::$guard !== null) {
+            (self::$guard)();
+        }
+    }
+
     /** Chạy lệnh, gom stdout+stderr vào $output, trả về exit code. */
     public static function run(string $cmd, &$output = null): int
     {
+        self::checkpoint();
         $lines = [];
         $code = 1;
         @exec($cmd . ' 2>&1', $lines, $code);
         $output = $lines;
+        self::checkpoint();
         return (int)$code;
     }
 
@@ -173,6 +186,7 @@ final class WNBShell
     /** Chạy lệnh và đưa dữ liệu vào stdin (dùng cho bí mật, tránh lộ trên danh sách tiến trình). */
     public static function runWithInput(string $cmd, string $input, &$output = null): int
     {
+        self::checkpoint();
         $proc = @proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
         if (!is_resource($proc)) {
             $output = ['Không chạy được lệnh'];
@@ -186,6 +200,7 @@ final class WNBShell
         fclose($pipes[2]);
         $code = proc_close($proc);
         $output = array_values(array_filter(explode("\n", (string)$stdout . "\n" . (string)$stderr), 'strlen'));
+        self::checkpoint();
         return (int)$code;
     }
 

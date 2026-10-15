@@ -64,6 +64,7 @@ final class WNBUi
             'sliders' => '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
             'refresh' => '<path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.9L20 16M20 20v-4h-4"/>',
             'play' => '<path d="M7 5v14l11-7z"/>',
+            'stop' => '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
             'download' => '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
             'trash' => '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
             'restore' => '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',

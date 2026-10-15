@@ -81,6 +81,27 @@ final class WNBApi
                 }
                 return ['log' => WNBStorage::readLog($task['id'])];
 
+            case 'task_cancel':
+                // Admin dừng được mọi tác vụ, cả lượt chạy của lịch; reseller/user chỉ dừng tác vụ chính họ tạo
+                // (không bỏ qua được bản sao lưu tự động admin đã đặt lịch).
+                if ($str('job_id') !== '' || $str('all') === '1') {
+                    self::requireAdmin($role);
+                    if ($str('job_id') !== '') {
+                        self::findJob($str('job_id'));
+                    }
+                    $n = WNBEngine::cancelAll($user, $str('job_id'));
+                    return $done($n ? 'Đã dừng {n} tác vụ.' : 'Không có tác vụ nào đang chạy.', ['n' => $n]);
+                }
+                $task = WNBEngine::findTask($str('task_id'));
+                if (!$task || ($role !== 'admin' && (!self::canAccess($user, $role, $task['username']) || ($task['initiated_by'] ?? '') !== $user))) {
+                    throw new WNBError('Không tìm thấy tác vụ.');
+                }
+                $r = WNBEngine::cancelTask($task['id'], $user);
+                if ($r === '') {
+                    throw new WNBError('Tác vụ đã kết thúc hoặc đang được dừng.');
+                }
+                return $done($r === 'cancelled' ? 'Đã dừng tác vụ.' : 'Đang dừng tác vụ, bản dở dang sẽ được dọn.');
+
             case 'backup_now':
                 if (!$perms['can_backup']) {
                     throw new WNBError('Bạn không có quyền tạo bản sao lưu.');

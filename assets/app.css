@@ -152,6 +152,8 @@
 .wnb .btn-ghost { background: transparent; border-color: transparent; color: var(--text-2); }
 .wnb .btn-ghost:hover { background: var(--surface-3); color: var(--text); }
 .wnb .btn-ghost.danger:hover { color: var(--danger); background: var(--danger-soft); }
+.wnb .btn-stop { color: var(--danger); border-color: rgba(204, 59, 59, .35); }
+.wnb .btn-stop:hover { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
 .wnb .btn-sm { height: 29px; padding: 0 10px; font-size: 12.5px; }
 .wnb .btn-icon { width: 32px; padding: 0; }
 .wnb .btn-sm.btn-icon { width: 29px; }

@@ -444,11 +444,20 @@
         return { backup: 'archive', snapshot: 'camera', restore: 'restore', download: 'download', delete: 'trash', maintain: 'shield', rescan: 'refresh' }[x.type] || 'activity';
     }
     function statusBadge(x) {
+        if (x.status === 'running' && x.cancel_by) return '<span class="badge warn run"><span class="dot"></span>' + esc(t('Đang dừng…')) + '</span>';
+        if (x.status === 'cancelled') return '<span class="badge">' + esc(t('Đã dừng')) + '</span>';
         if (x.status === 'running') return '<span class="badge info run"><span class="dot"></span>' + esc(t('Đang chạy')) + '</span>';
         if (x.status === 'pending') return '<span class="badge"><span class="dot"></span>' + esc(t('Đang chờ')) + '</span>';
         if (x.status === 'failed') return '<span class="badge bad">' + esc(t('Lỗi')) + '</span>';
         if (x.warnings) return '<span class="badge warn">' + esc(t('Hoàn tất · {n} cảnh báo', { n: x.warnings })) + '</span>';
         return '<span class="badge ok">' + esc(t('Hoàn tất')) + '</span>';
+    }
+    function isActive(x) { return x.status === 'pending' || x.status === 'running'; }
+    /** Nút Dừng: admin dừng mọi tác vụ; reseller/user chỉ tác vụ chính họ tạo. Tác vụ xóa đang chạy không dừng giữa chừng. */
+    function canCancel(x) {
+        if (!isActive(x) || x.cancel_by) return false;
+        if (x.status === 'running' && x.type === 'delete') return false;
+        return ROLE === 'admin' || x.initiated_by === S.me.user;
     }
     function scheduleText(j) {
         if (j.schedule_type === 'hourly') return esc(t('Mỗi {n} giờ', { n: j.interval_hours }));
@@ -618,7 +627,7 @@
             '<div class="grow"><div class="cell-main">' + esc(title) + '</div><div class="cell-sub">' + sub + '</div></div>' + (action || '') + '</div>';
     }
     function taskListItem(x) {
-        var tone = x.status === 'failed' ? 'bad' : (x.status === 'completed' ? 'ok' : 'run');
+        var tone = x.status === 'failed' ? 'bad' : (x.status === 'completed' ? 'ok' : (x.status === 'cancelled' ? '' : 'run'));
         return '<div class="list-item"><div class="list-icon ' + tone + '">' + ic(taskIcon(x)) + '</div>' +
             '<div class="grow"><div class="cell-main">' + esc(taskLabel(x)) + ' · ' + esc(x.username || destName(x.destination_id)) + '</div><div class="cell-sub ellipsis">' + esc(x.message) + '</div></div>' +
             '<div style="text-align:right"><div>' + statusBadge(x) + '</div><div class="cell-sub">' + esc(fmtRel(x.created_at)) + '</div></div></div>';
@@ -779,19 +788,22 @@
         var head = '<div>' + esc(fmtRel(j.last_run)) + '</div>';
         if (!r.finished_at) return head + '<div class="cell-sub">' + esc(t('Đang chạy {n} tài khoản', { n: r.total })) + '</div>';
         var cls = r.failed ? 'bad' : (r.warnings ? 'warn' : 'ok');
-        return head + '<span class="badge ' + cls + '">' + esc(t('{done}/{total} thành công', { done: r.done, total: r.total })) + (r.failed ? ' · ' + esc(t('{n} lỗi', { n: r.failed })) : '') + '</span>';
+        return head + '<span class="badge ' + cls + '">' + esc(t('{done}/{total} thành công', { done: r.done, total: r.total })) + (r.failed ? ' · ' + esc(t('{n} lỗi', { n: r.failed })) : '') + (r.cancelled ? ' · ' + esc(t('{n} đã dừng', { n: r.cancelled })) : '') + '</span>';
     }
 
     function viewJobs() {
         var jobs = S.jobs || [];
         var rows = jobs.map(function (j) {
+            var active = S.queue.filter(function (x) { return x.job_id === j.id && canCancel(x); }).length;
             return '<tr><td><div class="cell-main">' + esc(nameOf(j.name)) + '</div><div class="cell-sub">' + esc(destName(j.destination_id)) + ' · ' + esc(t('giữ {policy}', { policy: policyText(j.policy) })) + '</div></td>' +
                 '<td>' + scheduleText(j) + '</td>' +
                 '<td class="hide-sm"><div>' + esc(targetText(j)) + '</div><div class="cell-sub">' + esc(t('{n} tài khoản sẽ sao lưu', { n: j.target_count })) + '</div></td>' +
                 '<td class="hide-sm">' + lastResultBadge(j) + '</td>' +
                 '<td>' + (j.enabled && j.next_run ? esc(fmtNext(j.next_run)) + '<div class="cell-sub">' + esc(fmtDate(j.next_run, false)) + '</div>' : '<span class="muted">—</span>') + '</td>' +
                 '<td>' + switchHTML('data-act="job-toggle" data-id="' + esc(j.id) + '" aria-label="' + esc(t('Bật/tắt lịch')) + '"', j.enabled) + '</td>' +
-                '<td class="actions"><button class="btn btn-sm" data-act="job-run" data-id="' + esc(j.id) + '">' + ic('play') + esc(t('Chạy ngay')) + '</button>' +
+                '<td class="actions">' + (active
+                    ? '<button class="btn btn-sm btn-stop" data-act="job-stop" data-id="' + esc(j.id) + '" data-n="' + active + '">' + ic('stop') + esc(t('Dừng ({n})', { n: active })) + '</button>'
+                    : '<button class="btn btn-sm" data-act="job-run" data-id="' + esc(j.id) + '">' + ic('play') + esc(t('Chạy ngay')) + '</button>') +
                 '<button class="btn btn-sm btn-ghost btn-icon" data-act="job-edit" data-id="' + esc(j.id) + '" aria-label="' + esc(t('Sửa')) + '">' + ic('edit') + '</button>' +
                 '<button class="btn btn-sm btn-ghost btn-icon danger" data-act="job-delete" data-id="' + esc(j.id) + '" aria-label="' + esc(t('Xóa')) + '">' + ic('trash') + '</button></td></tr>';
         }).join('');
@@ -1139,15 +1151,19 @@
                 var s = Math.max(0, Math.round((parseDate(x.finished_at) - parseDate(x.started_at)) / 1000));
                 dur = '<div class="cell-sub">' + esc(s < 60 ? t('{n} giây', { n: s }) : t('{n} phút', { n: Math.round(s / 60) })) + '</div>';
             }
-            return '<tr><td><div class="row"><div class="list-icon ' + (x.status === 'failed' ? 'bad' : x.status === 'completed' ? 'ok' : 'run') + '">' + ic(taskIcon(x)) + '</div><div><div class="cell-main">' + esc(taskLabel(x)) + '</div><div class="cell-sub">' + esc(x.username || destName(x.destination_id)) + (ROLE !== 'user' ? ' · ' + esc(t('bởi {who}', { who: x.initiated_by === 'cron' ? t('lịch tự động') : x.initiated_by })) : '') + '</div></div></div></td>' +
+            return '<tr><td><div class="row"><div class="list-icon ' + (x.status === 'failed' ? 'bad' : x.status === 'completed' ? 'ok' : x.status === 'cancelled' ? '' : 'run') + '">' + ic(taskIcon(x)) + '</div><div><div class="cell-main">' + esc(taskLabel(x)) + '</div><div class="cell-sub">' + esc(x.username || destName(x.destination_id)) + (ROLE !== 'user' ? ' · ' + esc(t('bởi {who}', { who: x.initiated_by === 'cron' ? t('lịch tự động') : x.initiated_by })) : '') + '</div></div></div></td>' +
                 '<td style="min-width:220px">' + statusBadge(x) + '<div class="cell-sub" style="margin-top:3px;max-width:520px;overflow-wrap:anywhere">' + esc(x.message) + '</div>' + progress + '</td>' +
                 '<td class="nowrap hide-sm">' + esc(fmtRel(x.created_at)) + dur + '</td>' +
-                '<td class="actions"><button class="btn btn-sm btn-ghost" data-act="task-log" data-id="' + esc(x.id) + '">' + ic('list') + 'Log</button></td></tr>';
+                '<td class="actions">' + (canCancel(x) ? '<button class="btn btn-sm btn-stop" data-act="task-cancel" data-id="' + esc(x.id) + '">' + ic('stop') + esc(t('Dừng')) + '</button>' : '') +
+                '<button class="btn btn-sm btn-ghost" data-act="task-log" data-id="' + esc(x.id) + '">' + ic('list') + 'Log</button></td></tr>';
         }).join('');
         var html = '';
         if (ROLE === 'user' && S.downloads.length) html += downloadsCard() + '<div style="height:16px"></div>';
-        html += '<div class="card"><div class="card-head"><div class="card-title">' + esc(t('Tác vụ')) + '</div><div class="row-wrap right"><select class="select" style="width:auto" data-bind="taskStatus">' +
-            [['', t('Tất cả')], ['active', t('Đang chạy / chờ')], ['completed', t('Hoàn tất')], ['failed', t('Lỗi')]].map(function (o) { return '<option value="' + o[0] + '"' + (ui.taskStatus === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') +
+        var stoppable = ROLE === 'admin' ? S.queue.filter(canCancel).length : 0;
+        html += '<div class="card"><div class="card-head"><div class="card-title">' + esc(t('Tác vụ')) + '</div><div class="row-wrap right">' +
+            (stoppable > 1 ? '<button class="btn btn-sm btn-stop" data-act="task-cancel-all">' + ic('stop') + esc(t('Dừng tất cả ({n})', { n: stoppable })) + '</button>' : '') +
+            '<select class="select" style="width:auto" data-bind="taskStatus">' +
+            [['', t('Tất cả')], ['active', t('Đang chạy / chờ')], ['completed', t('Hoàn tất')], ['failed', t('Lỗi')], ['cancelled', t('Đã dừng')]].map(function (o) { return '<option value="' + o[0] + '"' + (ui.taskStatus === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') +
             '</select></div></div>' +
             (list.length ? '<div class="table-wrap"><table class="t"><thead><tr><th>' + esc(t('Tác vụ')) + '</th><th>' + esc(t('Trạng thái')) + '</th><th class="hide-sm">' + esc(t('Thời gian')) + '</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
                 : empty('activity', t('Không có tác vụ'), '')) + '</div>';
@@ -1558,6 +1574,27 @@
             case 'task-log':
                 showLog(d.id);
                 break;
+            case 'task-cancel': {
+                var tk = byId(d.id, S.queue);
+                if (!tk) break;
+                var note = tk.status === 'pending' ? t('Tác vụ đang chờ sẽ được bỏ khỏi hàng đợi.')
+                    : tk.type === 'restore' ? t('Dữ liệu có thể mới được khôi phục một phần. Sau khi dừng, hãy khôi phục lại nếu cần.')
+                        : (tk.type === 'backup' || tk.type === 'snapshot') ? t('Bản sao lưu dở dang sẽ bị xóa, các bản cũ không bị ảnh hưởng.')
+                            : t('Lệnh đang chạy sẽ bị dừng ngay.');
+                confirmBox({ title: t('Dừng tác vụ?'), body: '<p><b>' + esc(taskLabel(tk)) + '</b> · ' + esc(tk.username || destName(tk.destination_id)) + '</p><p class="muted">' + esc(note) + '</p>', ok: t('Dừng'), danger: true })
+                    .then(function (ok) { if (ok) run(el, api('task_cancel', { task_id: d.id })); });
+                break;
+            }
+            case 'task-cancel-all':
+                confirmBox({ title: t('Dừng mọi tác vụ?'), body: '<p>' + esc(t('Mọi tác vụ đang chờ và đang chạy sẽ bị dừng (trừ tác vụ xóa đang chạy). Bản sao lưu dở dang sẽ bị xóa.')) + '</p>', ok: t('Dừng tất cả'), danger: true })
+                    .then(function (ok) { if (ok) run(el, api('task_cancel', { all: '1' })); });
+                break;
+            case 'job-stop': {
+                var js = byId(d.id, S.jobs);
+                confirmBox({ title: t('Dừng lượt chạy?'), body: '<p>' + esc(t('Dừng {n} tác vụ còn lại của lịch "{job}". Tài khoản đã sao lưu xong vẫn giữ bản sao lưu; lịch vẫn chạy lại vào lần tới.', { n: d.n, job: js ? nameOf(js.name) : '' })) + '</p>', ok: t('Dừng'), danger: true })
+                    .then(function (ok) { if (ok) run(el, api('task_cancel', { job_id: d.id })); });
+                break;
+            }
             case 'job-edit':
                 jobForm(d.id ? byId(d.id, S.jobs) : null);
                 break;
