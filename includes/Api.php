@@ -191,6 +191,9 @@ final class WNBApi
             case 'dest_save':
                 self::requireAdmin($role);
                 [$key, $vars, $ok, $newKey] = self::saveDestination($p);
+                // Kho sửa vị trí phải đo lại; kho mới chưa có số đo nên cũng được đo.
+                WNBEngine::markUsageStale(array_filter([$str('id')], 'strlen'));
+                WNBEngine::kick();
                 return $done($key, $vars, ['test_ok' => $ok, 'restic_new_key' => $newKey]);
 
             case 'dest_oauth_start':
@@ -253,6 +256,11 @@ final class WNBApi
                 }
                 $res = WNBRclone::test($dest);
                 self::updateDestination($dest['id'], ['free_gb' => $res['free_gb'], 'last_test' => ['ok' => $res['ok'], 'message' => $res['message'], 'at' => WNB::now()]]);
+                if ($res['ok']) {
+                    // Đo dung lượng có thể lâu (rclone size cả kho): để worker đo nền.
+                    WNBEngine::markUsageStale([$dest['id']]);
+                    WNBEngine::kick();
+                }
                 return $done('{detail}', ['detail' => $res['message']], ['test_ok' => $res['ok']]);
 
             case 'dest_delete':
@@ -477,8 +485,18 @@ final class WNBApi
         }
 
         $destinations = [];
+        // Dung lượng thật các kho đang chiếm (đo bằng du / rclone size), không cộng size_mb từng bản: bản
+        // Incremental dùng chung dữ liệu với nhau nên cộng lại sẽ lớn gấp nhiều lần.
+        $usedBytes = null;
+        $unmeasured = 0;
+        $hasBackups = array_flip(array_column($allBackups, 'destination_id'));
         foreach (WNBStorage::read('destinations') as $d) {
             if ($role === 'admin') {
+                if (isset($d['usage']['bytes'])) {
+                    $usedBytes = (int)$usedBytes + (int)$d['usage']['bytes'];
+                } elseif (isset($hasBackups[$d['id']])) {
+                    $unmeasured++;
+                }
                 $params = $d['type'] !== 'local' ? WNBRclone::readRemote($d['remote']) : [];
                 foreach (WNBRclone::SECRET_FIELDS as $f) {
                     if (isset($params[$f])) {
@@ -516,6 +534,8 @@ final class WNBApi
                 'accounts' => count($accounts),
                 'backups' => count($backups),
                 'size_mb' => round($totalMb, 1),
+                'used_bytes' => $role === 'admin' ? $usedBytes : null,
+                'used_unmeasured' => $unmeasured,
                 'running' => $running,
                 'failed_24h' => $failed24,
             ],

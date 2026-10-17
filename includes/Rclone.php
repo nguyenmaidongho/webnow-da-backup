@@ -282,6 +282,44 @@ final class WNBRclone
     }
 
     /**
+     * Dung lượng thật kho đang chiếm (byte): ổ cứng đo bằng du một lần cho mọi thư mục không ẩn (hardlink giữa
+     * các bản chỉ tính một lần), cloud đo bằng rclone size cả thư mục của kho (kho restic: đã gộp trùng và nén).
+     * Ném WNBError khi không đo được.
+     */
+    public static function usage(array $dest): int
+    {
+        if (($dest['type'] ?? 'local') === 'local') {
+            $path = rtrim((string)($dest['path'] ?? ''), '/');
+            if ($path === '' || !is_dir($path)) {
+                return 0;
+            }
+            // Thư mục ẩn (.staging, .downloads, .restic-cache) là vùng làm việc, không phải bản sao lưu.
+            $code = WNBShell::run('find ' . escapeshellarg($path) . ' -mindepth 1 -maxdepth 1 ! -name ' . escapeshellarg('.*') . ' -exec du -skc {} +', $out);
+            $kb = 0;
+            foreach ($out as $line) {
+                if (preg_match('/^(\d+)\s+total$/', trim($line), $m)) {
+                    $kb += (int)$m[1];
+                }
+            }
+            if ($code !== 0 && $kb === 0) {
+                throw new WNBError('Không đo được dung lượng {path}: {detail}', ['path' => $path, 'detail' => WNBShell::tail($out, 2)]);
+            }
+            return $kb * 1024;
+        }
+        if (!self::installed()) {
+            throw new WNBError('Chưa cài rclone trên máy chủ.');
+        }
+        $code = WNBShell::run(self::cmd('size --json ' . escapeshellarg(self::base($dest)) . ' --contimeout 15s --timeout 60s'), $out);
+        $raw = implode("\n", $out);
+        $start = strpos($raw, '{');
+        $j = ($code === 0 && $start !== false) ? json_decode(substr($raw, $start), true) : null;
+        if (!is_array($j) || !isset($j['bytes'])) {
+            throw new WNBError('Không đo được dung lượng kho: {detail}', ['detail' => WNBShell::tail($out, 2)]);
+        }
+        return max(0, (int)$j['bytes']);
+    }
+
+    /**
      * Liệt kê một thư mục trong homedir của bản sao lưu.
      * Bản local: chặn mọi đường dẫn đi qua symlink để không lộ file ngoài bản sao lưu.
      */

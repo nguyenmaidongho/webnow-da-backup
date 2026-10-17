@@ -2,7 +2,7 @@
 
 Plugin sao lưu và khôi phục cho **DirectAdmin** (giao diện Evolution, sáng/tối), dùng được ở cả ba cấp **Admin, Reseller và User**. Sao lưu lên ổ cứng máy chủ hoặc lên cloud (S3, R2, B2, Google Drive, OneDrive…). Mã hóa và incremental bằng restic, khôi phục được từng file. Song ngữ Tiếng Việt / English.
 
-Phiên bản hiện tại: **2.6.0** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
+Phiên bản hiện tại: **2.6.1** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
 
 ---
 
@@ -24,6 +24,7 @@ Phiên bản hiện tại: **2.6.0** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đ�
 - Sửa kho mà vị trí thay đổi thì plugin tự gỡ các bản cũ khỏi danh sách (không xóa dữ liệu ở vị trí cũ), tránh danh sách trỏ tới bản không còn.
 - **"Quét lại kho" cho mọi kiểu kho** (Incremental, Nén, Thư mục, ổ cứng máy chủ): cài lại máy chủ thì thêm lại kho với cùng vị trí rồi bấm Quét lại để nạp lại danh sách bản sao lưu. Kiểu Nén/Thư mục đọc `manifest.json` của từng bản, kể cả bản tạo bằng các phiên bản cũ.
 - **Chuyển kho** (nút ở bảng Kho lưu trữ): chuyển mọi bản sao lưu của một kho sang kho mới thêm, thư mục trống, ví dụ từ kho S3 nhỏ sang kho S3 lớn hơn, hoặc từ ổ cứng máy chủ lên cloud. Plugin chép dữ liệu, so lại từng file ở kho mới rồi mới chuyển danh sách, nên chủ sở hữu, lịch và nhãn giữ bản giữ nguyên (khách vẫn thấy bản của mình). Tùy chọn: lịch và snapshot từ nay lưu vào kho mới, xóa dữ liệu ở kho cũ sau khi kiểm tra xong. Lỗi hoặc bấm Dừng trong lúc chép thì phần đã chép ở kho mới được dọn, kho cũ không bị đụng tới. Trong lúc chuyển, các tác vụ khác của hai kho tự đợi. Kho restic chuyển nguyên kho (cùng mật khẩu) sang kho restic mới.
+- **Dung lượng thật của kho** (2.6.1): Tổng quan, bảng Kho lưu trữ và hộp Chuyển kho hiện dung lượng kho thực sự chiếm, đo bằng `du` (ổ cứng, hardlink chỉ tính một lần) hoặc `rclone size` (cloud). Số này không phải tổng dung lượng từng bản: các bản Incremental dùng chung dữ liệu nên cộng lại sẽ lớn gấp nhiều lần. Plugin đo nền khi không có tác vụ: sau mỗi lần sao lưu, xóa, dọn kho hoặc chuyển kho, khi bấm Kiểm tra, và ít nhất mỗi ngày một lần.
 - **Loại trừ đường dẫn** (Cài đặt): mỗi dòng một mẫu tính từ home, ví dụ `lscache/*`. Mẫu bắt đầu bằng `**/` khớp ở mọi cấp thư mục, ví dụ `**/node_modules`.
 - **Tài khoản nhiều database dump nhanh**: database được `mysqldump` song song (4 luồng). Với kho restic, các database nhỏ được gom theo lô, mỗi lô một snapshot, thay vì mỗi database một lần gọi restic. Database lớn vẫn dump thẳng vào restic. Tài khoản 1200 database không còn mất hàng giờ.
 - Giới hạn băng thông tải lên (`bwlimit`); tiến trình sao lưu chạy với `nice`/`ionice` để không làm chậm web của khách.

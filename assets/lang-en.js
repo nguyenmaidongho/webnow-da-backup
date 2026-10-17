@@ -517,5 +517,12 @@ window.WNB_EN = {
     "Từ nay {what} lưu vào kho mới": "From now on, {what} save to the new destination",
     "Xóa dữ liệu ở kho cũ sau khi chép và kiểm tra xong": "Delete the data in the old destination after copying and checking",
     "Trong lúc chuyển, sao lưu, khôi phục và tải về của hai kho sẽ đợi. Kho cũ vẫn còn trong danh sách (trống), bạn tự xóa khi không dùng nữa.": "While moving, backups, restores and downloads on both destinations wait. The old destination stays in the list (empty); delete it yourself when no longer needed.",
-    "Phần đã chép sang kho mới sẽ được dọn, kho cũ và danh sách bản sao lưu giữ nguyên.": "Data already copied to the new destination is cleaned up; the old destination and the backup list stay as they are."
+    "Phần đã chép sang kho mới sẽ được dọn, kho cũ và danh sách bản sao lưu giữ nguyên.": "Data already copied to the new destination is cleaned up; the old destination and the backup list stay as they are.",
+    "chưa đo dung lượng": "size not measured yet",
+    "Lần đo gần nhất lỗi: {detail}": "Last measurement failed: {detail}",
+    "Đo lúc {when}": "Measured {when}",
+    "Không có bản sao lưu · còn {size} dữ liệu": "No backups · {size} of data left",
+    "Đang đo dung lượng kho": "Measuring destination usage",
+    "Các kho đang chiếm {size}": "Destinations use {size}",
+    "{n} kho chưa đo": "{n} not measured yet"
 };

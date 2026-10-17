@@ -284,4 +284,6 @@ return [
     'Không mở được kho restic đã chép sang {dest}: {detail}' => 'Couldn\'t open the restic repository copied to {dest}: {detail}',
     'Kho restic ở {dest} thiếu snapshot {id} của bản {backup}.' => 'The restic repository in {dest} is missing snapshot {id} of backup {backup}.',
     'Không thấy mật khẩu của kho restic {dest}.' => 'The restic password for {dest} is missing.',
+    'Không đo được dung lượng {path}: {detail}' => 'Couldn\'t measure the size of {path}: {detail}',
+    'Không đo được dung lượng kho: {detail}' => 'Couldn\'t measure the destination size: {detail}',
 ];

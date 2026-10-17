@@ -634,6 +634,13 @@
 
     /* ============================== Tổng quan (admin) ============================== */
 
+    /** Admin: dung lượng thật các kho đang chiếm. Reseller/user không thấy kho: tổng dung lượng các bản của mình. */
+    function backupsSub(st) {
+        if (ROLE !== 'admin') return t('{size} trên các kho', { size: fmtMb(st.size_mb) });
+        if (st.used_bytes === null || st.used_bytes === undefined) return t('Đang đo dung lượng kho');
+        var s = t('Các kho đang chiếm {size}', { size: fmtBytes(st.used_bytes) });
+        return st.used_unmeasured ? s + ' · ' + t('{n} kho chưa đo', { n: st.used_unmeasured }) : s;
+    }
     function viewOverview() {
         var st = S.stats;
         var cutoff = serverNow() - 48 * 3600 * 1000;
@@ -641,7 +648,7 @@
         var stale = S.accounts.filter(function (a) { var d = parseDate(a.last_backup_at); return !excluded[a.username] && !noJob[a.username] && (!d || d.getTime() < cutoff); });
         var html = healthBanner() + '<div class="grid grid-4" style="margin-bottom:16px">' +
             statCard('users', '', t('Tài khoản'), st.accounts, esc(stale.length ? t('{n} chưa sao lưu trong 48 giờ', { n: stale.length }) : t('Tất cả đã được sao lưu'))) +
-            statCard('archive', 'ok', t('Bản sao lưu'), st.backups, esc(t('{size} trên các kho', { size: fmtMb(st.size_mb) }))) +
+            statCard('archive', 'ok', t('Bản sao lưu'), st.backups, esc(backupsSub(st))) +
             statCard('activity', st.running ? '' : 'ok', t('Đang chạy'), st.running, esc(st.running ? t('Tác vụ trong hàng đợi') : t('Không có tác vụ'))) +
             statCard('alert', st.failed_24h ? 'bad' : 'ok', t('Lỗi 24 giờ qua'), st.failed_24h, st.failed_24h ? '<a href="#" data-act="tab" data-tab="tasks" data-filter="failed">' + esc(t('Xem chi tiết')) + '</a>' : esc(t('Không có lỗi'))) +
             '</div>';
@@ -1008,7 +1015,9 @@
                 ((mt.check_ok === false || mt.prune_ok === false) ? ' <span class="badge bad" title="' + esc(mt.check_msg || mt.prune_msg || '') + '">' + esc(t('Kho có lỗi')) + '</span>' : '') : '';
             var test = d.last_test ? '<span class="badge ' + (d.last_test.ok ? 'ok' : 'bad') + '" title="' + esc(d.last_test.message) + '">' + esc(d.last_test.ok ? t('Kết nối tốt') : t('Lỗi kết nối')) + '</span><div class="cell-sub">' + esc(fmtRel(d.last_test.at)) + '</div>' : '<span class="muted">' + esc(t('Chưa kiểm tra')) + '</span>';
             return '<tr><td><div class="row"><div class="list-icon">' + ic(ty.icon) + '</div><div><div class="cell-main">' + esc(nameOf(d.name)) + '</div><div class="cell-sub mono">' + esc(where) + '</div>' +
-                (counts[d.id] ? '<div class="cell-sub">' + esc(t('{n} bản sao lưu · {size}', { n: counts[d.id].n, size: fmtMb(counts[d.id].mb) })) + '</div>' : '') + '</div></div></td>' +
+                (counts[d.id] ? '<div class="cell-sub"' + usageTitle(d) + '>' + esc(t('{n} bản sao lưu · {size}', { n: counts[d.id].n, size: usageText(d) || t('chưa đo dung lượng') })) + '</div>'
+                    // Dữ liệu còn lại khi không còn bản nào (vd chuyển kho mà không xóa kho cũ).
+                    : (d.usage && d.usage.bytes > 0 ? '<div class="cell-sub"' + usageTitle(d) + '>' + esc(t('Không có bản sao lưu · còn {size} dữ liệu', { size: usageText(d) })) + '</div>' : '')) + '</div></div></td>' +
                 '<td class="hide-sm">' + esc(t(ty.label)) + '<div class="cell-sub">' + esc(formatLabel(d)) + '</div>' + maint + '</td><td class="num">' + (d.free_gb !== null && d.free_gb !== undefined ? esc(d.free_gb) + ' GB' : '—') + '</td><td>' + test + '</td>' +
                 '<td class="actions"><button class="btn btn-sm" data-act="dest-test" data-id="' + esc(d.id) + '">' + ic('check') + esc(t('Kiểm tra')) + '</button>' +
                 (d.format === 'restic' && d.restic_key ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-key" data-id="' + esc(d.id) + '" title="' + esc(t('Mật khẩu kho restic')) + '" aria-label="' + esc(t('Mật khẩu kho restic')) + '">' + ic('shield') + '</button>' : '') +
@@ -1114,13 +1123,25 @@
         if (d.format === 'restic') return t('Incremental (restic)');
         return d.format === 'archive' ? t('Nén') : t('Thư mục');
     }
-    /** Số bản sao lưu, dung lượng và kiểu bản theo kho. */
+    /**
+     * Dung lượng thật kho đang chiếm (worker đo bằng du / rclone size); '' khi chưa đo. Không cộng size_mb từng
+     * bản: bản Incremental dùng chung dữ liệu nên cộng lại lớn gấp nhiều lần.
+     */
+    function usageText(d) {
+        var u = d && d.usage;
+        return u && u.bytes !== null && u.bytes !== undefined ? fmtBytes(u.bytes) : '';
+    }
+    function usageTitle(d) {
+        var u = (d && d.usage) || {};
+        var s = u.error ? t('Lần đo gần nhất lỗi: {detail}', { detail: u.error }) : u.at ? t('Đo lúc {when}', { when: fmtDate(u.at) }) : '';
+        return s ? ' title="' + esc(s) + '"' : '';
+    }
+    /** Số bản sao lưu và kiểu bản theo kho. */
     function destCounts() {
         var c = {};
         S.backups.forEach(function (b) {
-            var x = c[b.destination_id] || (c[b.destination_id] = { n: 0, mb: 0, restic: 0, archive: 0 });
+            var x = c[b.destination_id] || (c[b.destination_id] = { n: 0, restic: 0, archive: 0 });
             x.n++;
-            x.mb += +b.size_mb || 0;
             if (b.format === 'restic') x.restic++;
             if (b.format === 'archive') x.archive++;
         });
@@ -1137,7 +1158,7 @@
     }
     function moveForm(d) {
         if (!d) return;
-        var counts = destCounts(), c = counts[d.id] || { n: 0, mb: 0 };
+        var counts = destCounts(), c = counts[d.id] || { n: 0 };
         var others = S.destinations.filter(function (x) { return x.id !== d.id; });
         var ok = others.filter(function (x) { return !moveBlock(d, x, counts); });
         var opts = others.map(function (x) {
@@ -1149,7 +1170,7 @@
         var uses = [];
         if (jobs) uses.push(t('{n} lịch', { n: jobs }));
         if (snap) uses.push(t('snapshot'));
-        var body = '<div class="banner info" style="margin:0 0 14px">' + ic('info', 'i-lg') + '<div>' + esc(t('Chép {n} bản sao lưu ({size}) sang kho mới, so lại từng file rồi mới chuyển danh sách. Chủ sở hữu, lịch và nhãn giữ bản giữ nguyên nên khách vẫn thấy bản của mình.', { n: c.n, size: fmtMb(c.mb) })) + '</div></div>' +
+        var body = '<div class="banner info" style="margin:0 0 14px">' + ic('info', 'i-lg') + '<div>' + esc(t('Chép {n} bản sao lưu ({size}) sang kho mới, so lại từng file rồi mới chuyển danh sách. Chủ sở hữu, lịch và nhãn giữ bản giữ nguyên nên khách vẫn thấy bản của mình.', { n: c.n, size: usageText(d) || t('chưa đo dung lượng') })) + '</div></div>' +
             (ok.length ? '' : '<div class="banner warn" style="margin:0 0 14px">' + ic('alert', 'i-lg') + '<div>' + esc(t('Chưa có kho đích phù hợp. Hãy thêm một kho mới (thư mục trống) kiểu {format} rồi quay lại.', { format: c.restic ? t('Incremental (restic)') : t('Nén hoặc Thư mục') })) + '</div></div>') +
             '<form class="form-grid" data-form="move" autocomplete="off">' +
             '<div class="field full"><label>' + esc(t('Chuyển sang kho')) + '</label><select class="select" name="target_id"' + (ok.length ? '' : ' disabled') + '>' + opts + '</select>' +

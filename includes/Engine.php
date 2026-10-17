@@ -83,9 +83,12 @@ final class WNBEngine
             return;
         }
         try {
-            while ($task = self::claimNext()) {
-                self::execute($task);
-            }
+            do {
+                while ($task = self::claimNext()) {
+                    self::execute($task);
+                }
+                // Hết tác vụ thì đo lại dung lượng kho (mỗi lần một kho, xong lại xem có tác vụ mới không).
+            } while (self::measureNextUsage());
         } finally {
             WNBStorage::unlock($slot);
         }
@@ -170,6 +173,8 @@ final class WNBEngine
     {
         $id = $task['id'];
         WNBLang::set($task['lang'] ?? (string)WNBStorage::settings()['language']);
+        // Lấy trước khi chạy: tác vụ xóa làm mất bản ghi chỉ ra kho của bản.
+        $touched = in_array($task['type'], self::USAGE_TASKS, true) ? self::taskDestinations($task) : [];
         $flag = self::cancelFlag($id);
         WNBShell::$abort = fn() => is_file($flag);
         WNBShell::$guard = function () use ($flag) {
@@ -236,6 +241,8 @@ final class WNBEngine
             WNBShell::$abort = null;
             @unlink($flag);
         }
+        // Lỗi hay dừng giữa chừng cũng có thể đã ghi/xóa một phần dữ liệu.
+        self::markUsageStale($touched);
         if (!empty($task['job_id'])) {
             self::maybeJobReport($task['job_id']);
         }
@@ -2568,6 +2575,115 @@ final class WNBEngine
             }
             return null;
         });
+    }
+
+    /** Tác vụ làm đổi dung lượng kho (sao lưu kèm dọn bản cũ, xóa, prune, chuyển kho...). */
+    private const USAGE_TASKS = ['backup', 'snapshot', 'delete', 'maintain', 'rescan', 'cleanup', 'move'];
+
+    /** Đo lại dung lượng kho sau chừng này giây dù không có gì đổi (dữ liệu bị sửa ngoài plugin). */
+    private const USAGE_MAX_AGE = 86400;
+
+    /** Các kho tác vụ chạm vào; tác vụ dọn bản mồ côi có thể chạm mọi kho. */
+    private static function taskDestinations(array $t): array
+    {
+        if (($t['type'] ?? '') === 'cleanup') {
+            return array_column(WNBStorage::read('destinations'), 'id');
+        }
+        $ids = [(string)($t['destination_id'] ?? ''), (string)($t['target_id'] ?? '')];
+        if (!empty($t['backup_id'])) {
+            $ids[] = (string)(array_column(WNBStorage::read('backups'), 'destination_id', 'id')[$t['backup_id']] ?? '');
+        }
+        return array_values(array_unique(array_filter($ids, 'strlen')));
+    }
+
+    /** Đánh dấu cần đo lại dung lượng (worker đo khi hết tác vụ). */
+    public static function markUsageStale(array $ids): void
+    {
+        if (!$ids) {
+            return;
+        }
+        $ids = array_flip($ids);
+        WNBStorage::update('destinations', function ($l) use ($ids) {
+            $changed = false;
+            foreach ($l as &$d) {
+                if (isset($ids[$d['id']])) {
+                    $d['usage'] = array_merge((array)($d['usage'] ?? []), ['stale' => true, 'stale_ts' => time()]);
+                    $changed = true;
+                }
+            }
+            return $changed ? $l : null;
+        });
+    }
+
+    /** Kho chưa đo, cần đo lại hoặc đo đã lâu, và không có tác vụ nào đang chờ/chạy chạm vào nó. */
+    public static function usageDue(): array
+    {
+        $busy = [];
+        foreach (WNBStorage::read('queue') as $t) {
+            if (in_array($t['status'] ?? '', ['pending', 'running'], true)) {
+                $busy += array_flip(self::taskDestinations($t));
+            }
+        }
+        $due = [];
+        foreach (WNBStorage::read('destinations') as $d) {
+            $u = (array)($d['usage'] ?? []);
+            if (!isset($busy[$d['id']]) && (!isset($u['ts']) || !empty($u['stale']) || time() - (int)$u['ts'] >= self::USAGE_MAX_AGE)) {
+                $due[] = $d;
+            }
+        }
+        return $due;
+    }
+
+    /** Đo một kho đến hạn (worker gọi khi rảnh). Trả về false khi không còn gì để đo. */
+    public static function measureNextUsage(): bool
+    {
+        $lock = WNBStorage::lock('usage', false);
+        if (!$lock) {
+            return false; // worker khác đang đo
+        }
+        try {
+            $d = self::usageDue()[0] ?? null;
+            if (!$d) {
+                return false;
+            }
+            $u = ['bytes' => null, 'ts' => time(), 'at' => WNB::now(), 'error' => '', 'stale' => false];
+            try {
+                $u['bytes'] = WNB::isPreview() ? self::previewUsage($d['id']) : WNBRclone::usage($d);
+            } catch (Throwable $e) {
+                // Giữ số đo cũ để vẫn có cái hiển thị, kèm lỗi.
+                $u['bytes'] = $d['usage']['bytes'] ?? null;
+                $u['error'] = $e->getMessage();
+            }
+            WNBStorage::update('destinations', function ($l) use ($d, $u) {
+                foreach ($l as &$x) {
+                    if ($x['id'] === $d['id']) {
+                        // Có tác vụ đổi dữ liệu kho trong lúc đang đo thì số này đã cũ: giữ cờ để đo lại.
+                        $staleTs = (int)($x['usage']['stale_ts'] ?? 0);
+                        $x['usage'] = array_merge($u, ['stale' => $staleTs > $u['ts'],'stale_ts' => $staleTs]);
+                        return $l;
+                    }
+                }
+                return null;
+            });
+            return true;
+        } finally {
+            WNBStorage::unlock($lock);
+        }
+    }
+
+    /** Preview không có kho thật: bản cũ nhất của mỗi tài khoản tính đủ, bản Incremental sau đó chỉ tính phần mới. */
+    private static function previewUsage(string $destId): int
+    {
+        $mb = 0.0;
+        $seen = [];
+        $list = array_filter(WNBStorage::read('backups'), fn($b) => ($b['destination_id'] ?? '') === $destId);
+        usort($list, fn($a, $b) => strcmp((string)$a['created_at'], (string)$b['created_at']));
+        foreach ($list as $b) {
+            $full = !isset($seen[$b['username']]) || empty($b['incremental']);
+            $seen[$b['username']] = true;
+            $mb += $full ? (float)$b['size_mb'] : (float)($b['new_mb'] ?? 0);
+        }
+        return (int)round($mb * 1048576);
     }
 
     /**

@@ -71,11 +71,16 @@ switch ($cmd) {
             // Giám sát không được làm hỏng lượt cron.
         }
         WNBStorage::unlock($lock);
+        $kick = false;
         foreach (WNBStorage::read('queue') as $t) {
             if (WNBEngine::ready($t)) {
-                WNBEngine::kick();
+                $kick = true;
                 break;
             }
+        }
+        // Kho chưa đo/cần đo lại dung lượng: worker đo khi không có tác vụ.
+        if ($kick || WNBEngine::usageDue()) {
+            WNBEngine::kick();
         }
         break;
 
