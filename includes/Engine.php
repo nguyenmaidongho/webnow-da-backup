@@ -2440,12 +2440,18 @@ final class WNBEngine
         if (!$b) {
             throw new WNBError('Bản sao lưu không còn tồn tại.');
         }
+        // Có phạm vi (files/databases/emails/dns): chỉ đóng gói các mục đã chọn; không có: cả bản sao lưu.
+        $scope = (string)($task['scope'] ?? '');
+        $sel = $scope !== '' ? self::downloadSelection($b, $scope, (array)($task['items'] ?? [])) : null;
         $dlId = WNB::newId('dl');
         $file = self::downloadsRoot() . '/' . $dlId . '.tar.gz';
         $stage = '';
+        $warnings = [];
         try {
             if (WNB::isPreview()) {
-                file_put_contents($file, gzencode(json_encode($b, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)));
+                file_put_contents($file, gzencode(json_encode($sel ? ['backup' => $b['id'], 'selection' => $sel] : $b, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)));
+            } elseif ($sel) {
+                self::downloadPart($task, $b, $sel, $file, $warnings);
             } else {
                 $src = $b['storage_path'];
                 if (($b['format'] ?? '') === 'restic') {
@@ -2482,7 +2488,9 @@ final class WNBEngine
             'backup_id' => $b['id'],
             'username' => $b['username'],
             'owner_key' => $b['owner_key'] ?? '',
-            'filename' => $b['id'] . '.tar.gz',
+            'filename' => $b['id'] . ($sel ? '-' . $scope : '') . '.tar.gz',
+            'scope' => $sel ? $scope : 'full',
+            'items' => $sel ? count((array)$task['items']) : 0,
             'path' => $file,
             'size_mb' => round(((float)@filesize($file)) / 1048576, 1),
             'created_at' => WNB::now(),
@@ -2492,7 +2500,181 @@ final class WNBEngine
             array_unshift($l, $record);
             return $l;
         });
-        return ['message' => WNBLang::msg('File tải về đã sẵn sàng ({size} MB), tự xóa sau {hours} giờ', ['size' => $record['size_mb'], 'hours' => $ttl]), 'warnings' => []];
+        return ['message' => WNBLang::msg('File tải về đã sẵn sàng ({size} MB), tự xóa sau {hours} giờ', ['size' => $record['size_mb'], 'hours' => $ttl]), 'warnings' => $warnings];
+    }
+
+    /** Lọc mục cần tải theo nội dung bản sao lưu (khác khôi phục: không cần tài khoản còn tồn tại). */
+    public static function downloadSelection(array $b, string $scope, array $items): array
+    {
+        $sel = ['home' => [], 'databases' => [], 'emails' => [], 'dns' => [], 'cron' => false];
+        $items = array_values(array_unique(array_map('strval', $items)));
+        switch ($scope) {
+            case 'files':
+                foreach ($items as $p) {
+                    $p = self::cleanRelPath($p);
+                    if ($p !== null && $p !== '') {
+                        $sel['home'][] = $p;
+                    }
+                }
+                break;
+            case 'databases':
+                $sel['databases'] = array_values(array_filter($items, fn($db) => in_array($db, (array)$b['databases'], true) && preg_match('/^[a-z0-9_]+$/i', $db)));
+                break;
+            case 'emails':
+                $sel['emails'] = array_values(array_filter($items, function ($e) use ($b) {
+                    $parts = explode('@', $e, 2);
+                    return in_array($e, (array)$b['emails'], true) && count($parts) === 2 && preg_match('/^[a-z0-9._+\-]+$/i', $parts[0]) && $parts[0][0] !== '.' && WNBDirectAdmin::validDomain($parts[1]);
+                }));
+                break;
+            case 'dns':
+                $sel['dns'] = array_values(array_filter($items, fn($d) => in_array($d, (array)$b['domains'], true) && WNBDirectAdmin::validDomain($d)));
+                break;
+            default:
+                throw new WNBError('Phạm vi tải về không hợp lệ.');
+        }
+        if (!$sel['home'] && !$sel['databases'] && !$sel['emails'] && !$sel['dns']) {
+            throw new WNBError('Không có mục hợp lệ nào để tải về.');
+        }
+        return $sel;
+    }
+
+    /**
+     * Đóng gói đúng các mục đã chọn. Trong file .tar.gz: file và hộp thư giữ đường dẫn tính từ home
+     * (domains/..., imap/<domain>/<hộp thư>), database là <db>.sql.gz, DNS là <domain>.db.
+     */
+    private static function downloadPart(array $task, array $b, array $sel, string $file, array &$warnings): void
+    {
+        $homeItems = $sel['home'];
+        foreach ($sel['emails'] as $e) {
+            [$box, $d] = explode('@', $e, 2);
+            $homeItems[] = 'imap/' . $d . '/' . $box;
+        }
+        $format = $b['format'] ?? 'folder';
+        $stage = '';
+        try {
+            if ($format === 'restic' || ($b['destination_type'] ?? 'local') !== 'local') {
+                self::step($task, 15, 'Tải bản sao lưu từ cloud');
+                $stage = self::stagingRoot() . '/dl_' . $task['id'];
+                self::mkdirSecure($stage, 0700);
+            }
+            if ($format === 'restic') {
+                [$home, $dbDir, $dnsDir] = self::resticPart($b, $homeItems, $sel, $stage, $warnings);
+            } else {
+                $src = rtrim((string)$b['storage_path'], '/');
+                if ($stage !== '') {
+                    $archive = $format === 'archive';
+                    self::fetchRemote($src, $stage, $sel, $archive);
+                    if ($archive && $homeItems) {
+                        self::extractArchiveMembers($b, $homeItems, $stage . '/homedir');
+                    }
+                    $src = $stage;
+                } elseif (!is_dir($src)) {
+                    throw new WNBError('Không tìm thấy dữ liệu bản sao lưu trên đĩa.');
+                }
+                [$home, $dbDir, $dnsDir] = [$src . '/homedir', $src . '/databases', $src . '/dns'];
+            }
+
+            // Mỗi mục là "-C <thư mục> ./<tên>": "./" để tên bắt đầu bằng "-" không bị hiểu là tùy chọn của tar.
+            $args = '';
+            foreach ($homeItems as $rel) {
+                if (self::insideWithoutLinks($home, $rel)) {
+                    $args .= ' -C ' . escapeshellarg($home) . ' ' . escapeshellarg('./' . $rel);
+                } else {
+                    $warnings[] = WNBLang::msg('Bỏ qua {item}: không có trong bản sao lưu.', ['item' => $rel]);
+                }
+            }
+            foreach ($sel['databases'] as $db) {
+                if (is_file($dbDir . '/' . $db . '.sql.gz')) {
+                    $args .= ' -C ' . escapeshellarg($dbDir) . ' ' . escapeshellarg('./' . $db . '.sql.gz');
+                } else {
+                    $warnings[] = WNBLang::msg('Bản sao lưu không có dump của {db}.', ['db' => $db]);
+                }
+            }
+            foreach ($sel['dns'] as $d) {
+                if (is_file($dnsDir . '/' . $d . '.db')) {
+                    $args .= ' -C ' . escapeshellarg($dnsDir) . ' ' . escapeshellarg('./' . $d . '.db');
+                } else {
+                    $warnings[] = WNBLang::msg('Bản sao lưu không có DNS zone của {domain}.', ['domain' => $d]);
+                }
+            }
+            if ($args === '') {
+                throw new WNBError('Bản sao lưu không có mục nào đã chọn.');
+            }
+            self::step($task, 50, 'Nén thành file .tar.gz');
+            $code = WNBShell::run(sprintf('%star -czf %s%s', WNBShell::lowPriorityPrefix(), escapeshellarg($file), $args), $out);
+            if ($code !== 0) {
+                @unlink($file);
+                throw new WNBError('Nén thất bại: {detail}', ['detail' => WNBShell::tail($out, 2)]);
+            }
+        } finally {
+            if ($stage !== '') {
+                self::rmrf($stage);
+            }
+        }
+    }
+
+    /** Bản nén trên cloud: giải nén đúng các mục (có trong danh sách file) vào $dir để đóng gói lại. */
+    private static function extractArchiveMembers(array $b, array $items, string $dir): void
+    {
+        $members = array_values(array_filter($items, fn($rel) => self::archiveHas($b, $rel)));
+        if (!$members) {
+            return;
+        }
+        self::mkdirSecure($dir, 0700);
+        $tar = WNBShell::which('tar') ?: 'tar';
+        WNBShell::bash(sprintf(
+            '%s | gzip -dc | %s -xf - -C %s --no-same-owner --no-wildcards --quoting-style=literal -- %s; echo "WNB_PIPE ${PIPESTATUS[*]}"',
+            WNBRclone::cmd('cat ' . escapeshellarg(WNBRclone::join((string)$b['storage_path'], 'homedir.tar.gz')) . ' --retries 3', true),
+            escapeshellarg($tar),
+            escapeshellarg($dir),
+            implode(' ', array_map(fn($rel) => escapeshellarg('./' . $rel), $members))
+        ), $out);
+        [$dlCode, $gzCode, $tarCode] = self::pipeStatus($out, 3);
+        if ($dlCode !== 0 || $gzCode !== 0 || $tarCode !== 0) {
+            throw new WNBError('Tải bản sao lưu từ cloud thất bại: {detail}', ['detail' => WNBShell::tail($out, 3)]);
+        }
+    }
+
+    /** Kho restic: restore đúng các mục home + zone DNS, dump database đã chọn. Trả về [home, databases, dns]. */
+    private static function resticPart(array $b, array $homeItems, array $sel, string $stage, array &$warnings): array
+    {
+        $dest = self::findDestination((string)$b['destination_id']);
+        if (!$dest) {
+            throw new WNBError('Kho lưu trữ đã bị xóa.');
+        }
+        if (!WNBRestic::usable()) {
+            throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
+        }
+        $r = (array)$b['restic'];
+        $homePath = rtrim((string)$r['home_path'], '/');
+        $includes = [];
+        foreach ($homePath === '' ? [] : $homeItems as $rel) {
+            $includes[] = $homePath . '/' . $rel;
+        }
+        foreach ($sel['dns'] as $d) {
+            $includes[] = $r['meta_path'] . '/dns/' . $d . '.db';
+        }
+        if ($includes) {
+            $args = 'restore --retry-lock 30m ' . escapeshellarg((string)$r['home']) . ' --target ' . escapeshellarg($stage)
+                . implode('', array_map(fn($p) => ' --include ' . escapeshellarg(WNBRestic::literalPattern($p)), $includes));
+            if (WNBShell::run(WNBRestic::cmd($dest, $args, true), $out) !== 0) {
+                throw new WNBError('Tải bản sao lưu từ cloud thất bại: {detail}', ['detail' => WNBShell::tail($out, 3)]);
+            }
+        }
+        $dbDir = $stage . '/.wnb-databases';
+        foreach ($sel['databases'] as $db) {
+            $snap = (string)($r['dbs'][$db] ?? '');
+            if ($snap === '') {
+                continue; // thiếu file -> cảnh báo ở bước đóng gói
+            }
+            self::mkdirSecure($dbDir, 0700);
+            $code = WNBShell::bash(WNBRestic::cmd($dest, 'dump --retry-lock 30m ' . escapeshellarg($snap) . ' ' . escapeshellarg(WNBRestic::dbFile($r, $db)), true) . ' | gzip -c > ' . escapeshellarg($dbDir . '/' . $db . '.sql.gz'), $o);
+            if ($code !== 0) {
+                @unlink($dbDir . '/' . $db . '.sql.gz');
+                $warnings[] = WNBLang::msg('Tải {item} từ cloud thất bại: {detail}', ['item' => $db, 'detail' => WNBShell::tail($o, 2)]);
+            }
+        }
+        return [$homePath === '' ? $stage . '/.wnb-no-home' : $stage . $homePath, $dbDir, $stage . $r['meta_path'] . '/dns'];
     }
 
     /**

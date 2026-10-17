@@ -2,7 +2,7 @@
 
 Plugin sao lưu và khôi phục cho **DirectAdmin** (giao diện Evolution, sáng/tối), dùng được ở cả ba cấp **Admin, Reseller và User**. Sao lưu lên ổ cứng máy chủ hoặc lên cloud (S3, R2, B2, Google Drive, OneDrive…). Mã hóa và incremental bằng restic, khôi phục được từng file. Song ngữ Tiếng Việt / English.
 
-Phiên bản hiện tại: **2.6.2** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
+Phiên bản hiện tại: **2.7.0** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
 
 ---
 
@@ -62,6 +62,7 @@ Phiên bản hiện tại: **2.6.2** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đ�
 ### Khôi phục
 
 - **Từng phần**: file/thư mục, database, hộp thư email, DNS zone, cron, hoặc **toàn bộ tài khoản**.
+- **Tải về** (2.7.0): chọn file/thư mục, database, hộp thư hoặc DNS zone rồi bấm "Tải n mục" ở thanh chọn để chỉ đóng gói các mục đó; nút "Tải toàn bộ" ở đầu khung đóng gói cả bản sao lưu. Trong file tải về, file và hộp thư giữ đường dẫn tính từ home, database là `<db>.sql.gz`, DNS là `<tên miền>.db`.
 - Dữ liệu được dựng ở vùng staging của root, rồi **rsync vào home bằng quyền của chính user đó**. Symlink hay đường dẫn lừa không thể khiến root ghi ra ngoài.
 - **Tài khoản đã xóa**: bản sao lưu vẫn được giữ (hoặc tự xóa sau N ngày nếu bật "Tự xóa bản mồ côi"). Admin xem, tải về, xóa ở thẻ "Tài khoản đã xóa". Plugin hướng dẫn từng bước tạo lại tài khoản, subdomain, domain pointer, SSL rồi khôi phục toàn bộ.
 - Tài khoản tạo lại trùng tên: bản của tài khoản cũ được gắn nhãn riêng, và chính sách giữ bản của tài khoản mới không xóa mất chúng.

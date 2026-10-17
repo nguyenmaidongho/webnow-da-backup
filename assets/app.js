@@ -485,7 +485,7 @@
             case 'backup': return t('Sao lưu');
             case 'snapshot': return t('Tạo snapshot');
             case 'restore': return t('Khôi phục {scope}', { scope: scope[x.scope] || '' });
-            case 'download': return t('Đóng gói tải về');
+            case 'download': return x.scope && x.scope !== 'full' ? t('Đóng gói tải về {scope}', { scope: scope[x.scope] || '' }) : t('Đóng gói tải về');
             case 'delete': return t('Xóa bản sao lưu');
             case 'maintain': return t('Bảo trì kho');
             case 'rescan': return t('Quét lại kho');
@@ -838,7 +838,7 @@
 
     function downloadsCard() {
         var rows = S.downloads.map(function (d) {
-            return '<tr><td><div class="cell-main mono">' + esc(d.filename) + '</div><div class="cell-sub">' + esc(d.username) + '</div></td>' +
+            return '<tr><td><div class="cell-main mono">' + esc(d.filename) + '</div><div class="cell-sub">' + esc(d.username) + (d.scope && d.scope !== 'full' ? ' · ' + esc(t('{n} mục đã chọn', { n: d.items })) : '') + '</div></td>' +
                 '<td class="num">' + fmtMb(d.size_mb) + '</td><td class="hide-sm">' + esc(fmtRel(d.created_at)) + '</td><td class="hide-sm">' + esc(t('Hết hạn {when}', { when: fmtRel(d.expires_at) })) + '</td>' +
                 '<td class="actions"><a class="btn btn-sm btn-primary" href="' + esc(B.api + sep(B.api) + 'action=download_file&id=' + encodeURIComponent(d.id)) + '" target="_blank" rel="noopener">' + ic('download') + esc(t('Tải về')) + '</a>' +
                 '<button class="btn btn-sm btn-ghost btn-icon danger" data-act="download-delete" data-id="' + esc(d.id) + '" aria-label="' + esc(t('Xóa')) + '">' + ic('trash') + '</button></td></tr>';
@@ -1492,7 +1492,7 @@
         var seg = '<div class="seg" role="tablist">' + secs.map(function (s) {
             return '<button class="' + (R.section === s[0] ? 'active' : '') + '" data-act="restore-sec" data-sec="' + s[0] + '">' + ic(s[2]) + esc(s[1]) + (s[3] !== '' ? '<span class="n">' + s[3] + '</span>' : '') + '</button>';
         }).join('') + '</div>';
-        var actions = perm('can_download') ? '<button class="btn btn-sm" data-act="download-create" data-backup="' + esc(b.id) + '">' + ic('download') + esc(t('Tải về')) + '</button>' : '';
+        var actions = perm('can_download') ? '<button class="btn btn-sm" data-act="download-create" data-backup="' + esc(b.id) + '" title="' + esc(t('Đóng gói cả bản sao lưu (file, database, email, cấu hình) thành một file .tar.gz')) + '">' + ic('download') + esc(t('Tải toàn bộ')) + '</button>' : '';
         return '<div class="restore-layout"><div class="card"><div class="card-head"><div class="card-title">' + esc(t('Thời điểm sao lưu')) + ' <span class="badge">' + list.length + '</span></div></div><div class="points">' + points + '</div></div>' +
             '<div class="card"><div class="card-head"><div class="grow"><div class="cell-main" style="font-size:15px">' + esc(fmtDate(b.created_at)) + ' <span class="muted small" style="font-weight:400">· ' + esc(fmtRel(b.created_at)) + '</span></div>' +
             '<div class="cell-sub">' + esc(b.username) + ' · ' + fmtMb(b.size_mb) + ' · ' + esc(nameOf(b.destination_name)) + '</div></div>' + actions + '</div>' +
@@ -1557,7 +1557,7 @@
             '<div class="picks">' + items.map(function (x) {
                 return '<label class="pick"><input type="checkbox" class="cb" data-act="pick" data-val="' + esc(x) + '"' + (picks[x] ? ' checked' : '') + '>' + ic(icon) + '<span class="grow">' + esc(x) + '</span></label>';
             }).join('') + '</div>' +
-            '<div class="sel-bar"><span class="grow">' + (n ? esc(t('{n} mục đã chọn', { n: n })) : '<span class="muted">' + esc(t('Chưa chọn mục nào')) + '</span>') + '</span><button class="btn btn-primary" data-act="restore-picks"' + (n && canR ? '' : ' disabled') + '>' + ic('restore') + esc(t('Khôi phục mục đã chọn')) + '</button></div>';
+            '<div class="sel-bar"><span class="grow">' + (n ? esc(t('{n} mục đã chọn', { n: n })) : '<span class="muted">' + esc(t('Chưa chọn mục nào')) + '</span>') + '</span>' + dlSelButton(n) + '<button class="btn btn-primary" data-act="restore-picks"' + (n && canR ? '' : ' disabled') + '>' + ic('restore') + esc(t('Khôi phục mục đã chọn')) + '</button></div>';
     }
 
     function crumbs() {
@@ -1573,8 +1573,14 @@
 
     function selectionBar(canR) {
         var keys = Object.keys(R.sel);
-        return '<div class="sel-bar" data-selbar><span class="grow">' + (keys.length ? esc(t('{n} mục đã chọn', { n: keys.length })) + ' <button class="btn btn-sm btn-ghost" data-act="sel-clear">' + esc(t('Bỏ chọn')) + '</button>' : '<span class="muted">' + esc(t('Đánh dấu file hoặc thư mục cần khôi phục. Có thể chọn ở nhiều thư mục khác nhau.')) + '</span>') + '</span>' +
+        return '<div class="sel-bar" data-selbar><span class="grow">' + (keys.length ? esc(t('{n} mục đã chọn', { n: keys.length })) + ' <button class="btn btn-sm btn-ghost" data-act="sel-clear">' + esc(t('Bỏ chọn')) + '</button>' : '<span class="muted">' + esc(t('Đánh dấu file hoặc thư mục cần khôi phục. Có thể chọn ở nhiều thư mục khác nhau.')) + '</span>') + '</span>' + dlSelButton(keys.length) +
             '<button class="btn btn-primary" data-act="restore-files"' + (keys.length && canR ? '' : ' disabled') + '>' + ic('restore') + esc(keys.length ? t('Khôi phục {n} mục', { n: keys.length }) : t('Khôi phục')) + '</button></div>';
+    }
+
+    /** Nút tải về các mục đang chọn (cạnh nút Khôi phục ở thanh chọn). */
+    function dlSelButton(n) {
+        if (!perm('can_download')) return '';
+        return '<button class="btn" data-act="download-sel"' + (n ? '' : ' disabled') + ' title="' + esc(t('Đóng gói các mục đã chọn thành file .tar.gz để tải về')) + '">' + ic('download') + esc(n ? t('Tải {n} mục', { n: n }) : t('Tải về')) + '</button>';
     }
 
     function loadFiles(path) {
@@ -1818,6 +1824,12 @@
             case 'restore-files':
                 doRestore('files', Object.keys(R.sel));
                 break;
+            case 'download-sel': {
+                var dp = R.picks[R.section] || {};
+                var ditems = R.section === 'files' ? Object.keys(R.sel) : Object.keys(dp).filter(function (k) { return dp[k]; });
+                if (ditems.length) run(el, api('download_create', { backup_id: R.backupId, scope: R.section, items: ditems }));
+                break;
+            }
             case 'restore-picks': {
                 var picks = R.picks[R.section] || {};
                 doRestore(R.section, Object.keys(picks).filter(function (k) { return picks[k]; }));

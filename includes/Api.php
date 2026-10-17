@@ -164,7 +164,14 @@ final class WNBApi
                     throw new WNBError('Tính năng tải bản sao lưu đang bị tắt.');
                 }
                 $b = self::backupFor($user, $role, $str('backup_id'));
-                WNBEngine::enqueue(['type' => 'download', 'username' => $b['username'], 'initiated_by' => $user, 'role' => $role, 'backup_id' => $b['id']]);
+                // Không có scope: tải cả bản sao lưu; có scope: chỉ các mục đã chọn.
+                $scope = $str('scope') === 'full' ? '' : $str('scope');
+                $items = [];
+                if ($scope !== '') {
+                    $items = array_slice($list('items'), 0, 1000);
+                    WNBEngine::downloadSelection($b, $scope, $items);
+                }
+                WNBEngine::enqueue(['type' => 'download', 'username' => $b['username'], 'initiated_by' => $user, 'role' => $role, 'backup_id' => $b['id'], 'scope' => $scope, 'items' => $items]);
                 WNBEngine::kick();
                 return $done('Đang đóng gói, file sẽ xuất hiện ở mục Tải về.');
 
