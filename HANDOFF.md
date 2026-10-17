@@ -76,3 +76,4 @@ Lịch có 2 chế độ (`filter_mode`, 2.4.0 — người dùng yêu cầu th�
 
 ## Đang chờ người dùng
 control3: / (sda4, 64G, gồm cả /home và /backup) đầy 100% dung lượng VÀ 99% inode (còn ~31k). /backup/vaultbackup (dữ liệu plugin cũ, không dùng nữa) chiếm 14G; /backup/webnowbackup trống. Đã đề nghị: kiểm tra rồi xóa /backup/vaultbackup nếu không cần, tìm thư mục ngốn inode/dung lượng còn lại, về lâu dài dùng kho cloud hoặc gắn ổ riêng cho /backup. Bản 2.1.1 thêm kiểm tra inode (Engine::freeInodes, ngưỡng 50.000) trước khi sao lưu; lỗi đầy đĩa báo cả GB và inode trống. Người dùng chọn chuyển sang S3 kiểu Nén (2.2.0).
+- 2.6.2: Chuyển kho báo "Thư mục đích không trống (… NOTICE: Time may be set wrong …)" với kho cloud trống: `WNBShell::run` gộp stderr, nên dòng log của rclone (đồng hồ máy chủ lệch ~15 phút so với s3.cloudfly.vn) bị tính là một mục trong `lsf`. `assertMoveTargetEmpty` bỏ các dòng dạng `YYYY/MM/DD HH:MM:SS LEVEL`.

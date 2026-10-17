@@ -3257,7 +3257,9 @@ final class WNBEngine
             || WNBShell::run(WNBRclone::cmd('lsf ' . escapeshellarg($base) . ' --max-depth 1'), $out) !== 0) {
             throw new WNBError('Không đọc được kho đích: {detail}', ['detail' => WNBShell::tail($out, 2)]);
         }
-        $items = array_values(array_filter(array_map('trim', $out), 'strlen'));
+        // stderr gộp chung: bỏ dòng log của rclone ("2026/10/17 20:52:47 NOTICE: Time may be set wrong...").
+        $items = array_values(array_filter(array_map('trim', $out), fn($l) => $l !== ''
+            && !preg_match('#^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d (DEBUG|INFO|NOTICE|WARNING|ERROR|CRITICAL|ALERT|EMERGENCY)\b#', $l)));
         if ($restic && in_array('restic/', $items, true)) {
             $items = array_values(array_diff($items, ['restic/']));
             $code = WNBShell::run(WNBRestic::cmd($to, 'snapshots --json --no-lock'), $snap);
