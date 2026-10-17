@@ -41,6 +41,11 @@ final class WNBEngine
             'finished_at' => null,
             'pid' => 0,
         ];
+        if (isset($p['target_id'])) {
+            // Chuyển kho: kho đích và tùy chọn (dùng kho mới cho lịch, xóa dữ liệu ở kho cũ).
+            $task['target_id'] = (string)$p['target_id'];
+            $task['options'] = (array)($p['options'] ?? []);
+        }
         WNBStorage::update('queue', function ($q) use ($task) {
             array_unshift($q, $task);
             return array_slice($q, 0, 1000);
@@ -96,8 +101,9 @@ final class WNBEngine
     {
         $claimed = null;
         WNBStorage::update('queue', function ($q) use (&$claimed) {
+            $wait = self::moveBlocked($q);
             for ($i = count($q) - 1; $i >= 0; $i--) {
-                if (self::ready($q[$i])) {
+                if (self::ready($q[$i]) && !isset($wait[$q[$i]['id']])) {
                     $q[$i]['status'] = 'running';
                     $q[$i]['started_at'] = WNB::now();
                     $q[$i]['pid'] = getmypid();
@@ -198,6 +204,9 @@ final class WNBEngine
                 case 'cleanup':
                     $res = self::cleanupOrphans($task);
                     break;
+                case 'move':
+                    $res = self::moveDestination($task);
+                    break;
                 default:
                     throw new WNBError('Loại tác vụ không hợp lệ.');
             }
@@ -285,7 +294,7 @@ final class WNBEngine
                     $result = 'cancelled';
                     return $q;
                 }
-                if ($t['status'] === 'running' && !in_array($t['type'], self::UNSTOPPABLE, true) && empty($t['cancel_by'])) {
+                if ($t['status'] === 'running' && !in_array($t['type'], self::UNSTOPPABLE, true) && empty($t['no_cancel']) && empty($t['cancel_by'])) {
                     $t['cancel_by'] = $by;
                     $t['cancel_at'] = WNB::now();
                     $t['message'] = WNBLang::msg('Đang dừng…');
@@ -301,6 +310,9 @@ final class WNBEngine
         }
         if ($result === '' && $task['status'] === 'running' && in_array($task['type'], self::UNSTOPPABLE, true)) {
             throw new WNBError('Tác vụ xóa đang chạy không dừng giữa chừng được (bản sao lưu sẽ hỏng một nửa). Hãy đợi nó xong.');
+        }
+        if ($result === '' && $task['status'] === 'running' && !empty($task['no_cancel'])) {
+            throw new WNBError('Dữ liệu đã chép xong, đang chuyển bản ghi sang kho mới nên không dừng được nữa. Hãy đợi nó xong.');
         }
         if ($result === 'cancelled') {
             WNBStorage::log($id, wnb_t('ĐÃ DỪNG') . ': ' . wnb_t('Đã dừng bởi {who}.', ['who' => $by]));
@@ -324,7 +336,7 @@ final class WNBEngine
             if (!isset($ids[$t['status']]) || ($jobId !== '' && ($t['job_id'] ?? '') !== $jobId)) {
                 continue;
             }
-            if ($t['status'] === 'running' && (in_array($t['type'], self::UNSTOPPABLE, true) || !empty($t['cancel_by']))) {
+            if ($t['status'] === 'running' && (in_array($t['type'], self::UNSTOPPABLE, true) || !empty($t['no_cancel']) || !empty($t['cancel_by']))) {
                 continue;
             }
             $ids[$t['status']][] = $t['id'];
@@ -435,11 +447,11 @@ final class WNBEngine
         return false;
     }
 
-    /** Kho đang có tác vụ chờ hoặc đang chạy (sao lưu, khôi phục, tải về, xóa, bảo trì...). */
+    /** Kho đang có tác vụ chờ hoặc đang chạy (sao lưu, khôi phục, tải về, xóa, bảo trì, chuyển kho - cả kho đích...). */
     public static function destinationBusy(string $destId): bool
     {
         foreach (WNBStorage::read('queue') as $t) {
-            if (($t['destination_id'] ?? '') === $destId && in_array($t['status'], ['pending', 'running'], true)) {
+            if ((($t['destination_id'] ?? '') === $destId || ($t['target_id'] ?? '') === $destId) && in_array($t['status'], ['pending', 'running'], true)) {
                 return true;
             }
         }
@@ -1823,12 +1835,13 @@ final class WNBEngine
         $now = time();
         $due = array_filter(self::orphanPlan(), fn($o) => $o['at'] <= $now);
         $byId = array_column(WNBStorage::read('backups'), null, 'id');
+        $moving = self::movingDestinations();
         $n = 0;
         $i = 0;
         $warnings = [];
         foreach ($due as $id => $o) {
             $b = $byId[$id] ?? null;
-            if (!$b || self::backupBusy((string)$id)) {
+            if (!$b || self::backupBusy((string)$id) || isset($moving[$b['destination_id'] ?? ''])) {
                 continue;
             }
             self::step($task, 5 + (int)(90 * $i++ / max(1, count($due))), 'Xóa bản sao lưu mồ côi {id} ({user})', ['id' => $id, 'user' => $b['username']]);
@@ -2843,6 +2856,487 @@ final class WNBEngine
             WNBStorage::update('backups', fn($list) => array_values(array_filter($list, fn($b) => !in_array($b['id'], $gone, true))));
         }
         return count($gone);
+    }
+
+    /* ============================== Chuyển kho ============================== */
+
+    /** Kho nguồn và kho đích của các tác vụ chuyển kho đang chờ hoặc đang chạy: id => true. */
+    public static function movingDestinations(?array $queue = null): array
+    {
+        $ids = [];
+        foreach ($queue ?? WNBStorage::read('queue') as $t) {
+            if (($t['type'] ?? '') === 'move' && in_array($t['status'] ?? '', ['pending', 'running'], true)) {
+                $ids[(string)($t['destination_id'] ?? '')] = true;
+                $ids[(string)($t['target_id'] ?? '')] = true;
+            }
+        }
+        unset($ids['']);
+        return $ids;
+    }
+
+    /**
+     * Tác vụ phải đợi vì chuyển kho (id => true). Tác vụ chuyển kho chỉ bắt đầu khi hai kho không còn tác vụ nào
+     * đang chạy; từ lúc nó vào hàng đợi, tác vụ mới hơn chạm vào hai kho đó (sao lưu, khôi phục, tải về, xóa, bảo trì...)
+     * đợi nó xong, để dữ liệu không đổi trong lúc chép và bản ghi không bị chuyển giữa chừng một tác vụ.
+     */
+    public static function moveBlocked(array $q): array
+    {
+        if (!self::movingDestinations($q)) {
+            return [];
+        }
+        $destOf = array_column(WNBStorage::read('backups'), 'destination_id', 'id');
+        $touch = function (array $t) use ($destOf): array {
+            $d = [(string)($t['destination_id'] ?? ''), (string)($t['target_id'] ?? ''), (string)($destOf[$t['backup_id'] ?? ''] ?? '')];
+            return array_fill_keys(array_filter($d, 'strlen'), true);
+        };
+        $busy = [];
+        $reserved = [];
+        foreach ($q as $t) {
+            if (($t['status'] ?? '') === 'running') {
+                $busy += $touch($t);
+                if (($t['type'] ?? '') === 'move') {
+                    $reserved += $touch($t);
+                }
+            }
+        }
+        $wait = [];
+        for ($i = count($q) - 1; $i >= 0; $i--) {
+            // Hàng đợi mới nhất ở đầu: duyệt từ tác vụ cũ nhất.
+            $t = $q[$i];
+            if (($t['status'] ?? '') !== 'pending') {
+                continue;
+            }
+            $dests = $touch($t);
+            if (($t['type'] ?? '') === 'move') {
+                if (array_intersect_key($dests, $busy + $reserved)) {
+                    $wait[$t['id']] = true;
+                }
+                $reserved += $dests;
+            } elseif (array_intersect_key($dests, $reserved)) {
+                $wait[$t['id']] = true;
+            }
+        }
+        return $wait;
+    }
+
+    private static function moveKind(array $b): string
+    {
+        return ($b['format'] ?? '') === 'restic' ? 'restic' : 'files';
+    }
+
+    /**
+     * Lý do không chuyển được kho $from sang $to (null = được). Kho đích phải là kho mới: chưa có bản sao lưu nào
+     * (thư mục trống được kiểm tra lúc chạy) và cùng cách lưu: restic sang restic, Nén/Thư mục sang Nén/Thư mục/ổ cứng.
+     */
+    public static function moveProblem(array $from, array $to, array $backups): ?WNBError
+    {
+        if ($from['id'] === $to['id']) {
+            return new WNBError('Hãy chọn kho đích khác kho đang chuyển.');
+        }
+        $list = array_values(array_filter($backups, fn($b) => ($b['destination_id'] ?? '') === $from['id']));
+        if (!$list) {
+            return new WNBError('Kho "{name}" không có bản sao lưu nào để chuyển.', ['name' => $from['name']]);
+        }
+        foreach ($backups as $b) {
+            if (($b['destination_id'] ?? '') === $to['id']) {
+                return new WNBError('Kho đích "{name}" đã có bản sao lưu. Hãy chuyển sang một kho mới thêm, thư mục trống.', ['name' => $to['name']]);
+            }
+        }
+        $kinds = array_values(array_unique(array_map([self::class, 'moveKind'], $list)));
+        if (count($kinds) > 1) {
+            return new WNBError('Kho "{name}" có cả bản Incremental (restic) lẫn bản Nén/Thư mục nên chưa chuyển được.', ['name' => $from['name']]);
+        }
+        $toRestic = WNBRclone::destFormat($to) === 'restic';
+        if ($kinds[0] === 'restic' && !$toRestic) {
+            return new WNBError('Bản sao lưu của kho "{name}" là kiểu Incremental (restic) nên kho đích cũng phải là kho cloud kiểu Incremental (restic).', ['name' => $from['name']]);
+        }
+        if ($kinds[0] === 'files' && $toRestic) {
+            return new WNBError('Kho đích kiểu Incremental (restic) không nhận được bản kiểu Nén/Thư mục. Hãy chọn kho đích kiểu Nén hoặc Thư mục.');
+        }
+        if ($to['type'] === 'local' && array_filter($list, fn($b) => ($b['format'] ?? '') === 'archive')) {
+            return new WNBError('Bản kiểu Nén chỉ chuyển được sang kho cloud.');
+        }
+        if (self::sameStore($from, $to)) {
+            return new WNBError('Hai kho trỏ vào cùng một chỗ hoặc thư mục lồng nhau. Hãy chọn kho đích ở thư mục khác.');
+        }
+        return null;
+    }
+
+    /** Hai kho cùng nơi lưu với thư mục trùng hoặc lồng nhau (chép sang nhau sẽ ghi đè hoặc chép vào chính nó). */
+    public static function sameStore(array $a, array $b): bool
+    {
+        $nested = function (string $x, string $y): bool {
+            return $x === '' || $y === '' || strpos($x . '/', $y . '/') === 0 || strpos($y . '/', $x . '/') === 0;
+        };
+        if ($a['type'] === 'local' || $b['type'] === 'local') {
+            return $a['type'] === $b['type'] && $nested(rtrim((string)$a['path'], '/'), rtrim((string)$b['path'], '/'));
+        }
+        if ($a['type'] !== $b['type'] || (string)($a['account'] ?? '') !== (string)($b['account'] ?? '')
+            || WNBRclone::locationKey($a['type'], '', WNBRclone::readRemote((string)$a['remote'])) !== WNBRclone::locationKey($b['type'], '', WNBRclone::readRemote((string)$b['remote']))) {
+            return false;
+        }
+        return $nested(trim((string)$a['subpath'], '/'), trim((string)$b['subpath'], '/'));
+    }
+
+    /** Bản ghi sao lưu sau khi chuyển sang kho $to: đường dẫn theo kho mới, mọi trường khác (cả chủ sở hữu) giữ nguyên. */
+    public static function movedRecord(array $b, array $to): array
+    {
+        $b['destination_id'] = $to['id'];
+        $b['destination_name'] = $to['name'];
+        $b['destination_type'] = $to['type'];
+        if (($b['format'] ?? '') === 'restic') {
+            $b['storage_path'] = WNBRestic::repo($to);
+        } elseif ($to['type'] === 'local') {
+            $b['storage_path'] = rtrim((string)$to['path'], '/') . '/' . $b['username'] . '/' . $b['id'];
+        } else {
+            $b['storage_path'] = WNBRclone::join(WNBRclone::base($to), $b['username'], $b['id']);
+        }
+        return $b;
+    }
+
+    /** Thư mục gốc của kho: đường dẫn local hoặc remote:subpath. */
+    private static function moveRoot(array $dest): string
+    {
+        return $dest['type'] === 'local' ? rtrim((string)$dest['path'], '/') : WNBRclone::base($dest);
+    }
+
+    /**
+     * Chuyển mọi bản sao lưu của một kho sang kho mới (vd kho S3 nhỏ sang kho S3 lớn): chép dữ liệu, kiểm tra
+     * kho mới có đủ, rồi mới chuyển bản ghi (giữ nguyên chủ sở hữu, lịch, nhãn giữ bản). Lỗi hoặc bị dừng trước
+     * bước chuyển bản ghi thì dọn phần đã chép ở kho mới, kho cũ không bị đụng tới.
+     */
+    private static function moveDestination(array $task): array
+    {
+        $from = self::findDestination((string)$task['destination_id']);
+        $to = self::findDestination((string)($task['target_id'] ?? ''));
+        if (!$from || !$to) {
+            throw new WNBError('Kho lưu trữ đã bị xóa.');
+        }
+        $opt = (array)($task['options'] ?? []);
+        $all = WNBStorage::read('backups');
+        $problem = self::moveProblem($from, $to, $all);
+        if ($problem) {
+            throw $problem;
+        }
+        $list = array_values(array_filter($all, fn($b) => ($b['destination_id'] ?? '') === $from['id']));
+        $restic = self::moveKind($list[0]) === 'restic';
+        $preview = WNB::isPreview();
+        $warnings = [];
+        if (!$preview) {
+            if (($from['type'] !== 'local' || $to['type'] !== 'local') && !WNBRclone::installed()) {
+                throw new WNBError('Chưa cài rclone trên máy chủ.');
+            }
+            if ($restic && !WNBRestic::usable()) {
+                throw new WNBError('Máy chủ chưa cài restic {min} trở lên. Chạy lại scripts/install.sh bằng root để cài.', ['min' => WNBRestic::MIN_VERSION]);
+            }
+            if ($restic && !WNBRestic::hasKey($from['id'])) {
+                throw new WNBError('Không thấy mật khẩu của kho restic {dest}.', ['dest' => $from['name']]);
+            }
+            foreach ($list as $b) {
+                // Chỉ chép theo <user>/<id> trong thư mục của kho: bản nằm chỗ khác thì không chuyển được an toàn.
+                if (!WNBDirectAdmin::validUsername((string)$b['username']) || !preg_match('/^(bkp|snap)_[A-Za-z0-9_\-]+$/', (string)$b['id'])
+                    || (!$restic && rtrim((string)($b['storage_path'] ?? ''), '/') !== self::movedRecord($b, $from)['storage_path'])) {
+                    throw new WNBError('Bản {id} không nằm đúng chỗ trong kho {dest} ({path}) nên chưa chuyển được.', ['id' => $b['id'], 'dest' => $from['name'], 'path' => (string)($b['storage_path'] ?? '')]);
+                }
+            }
+            self::step($task, 3, 'Kiểm tra kho đích {dest}', ['dest' => $to['name']]);
+            self::assertMoveTargetEmpty($to, $restic);
+            try {
+                if ($restic) {
+                    self::moveResticRepo($task, $from, $to, $list);
+                } else {
+                    self::moveFiles($task, $from, $to, $list);
+                }
+            } catch (Throwable $e) {
+                // Kho đích lúc đầu trống: dọn phần đã chép dở để chuyển lại được.
+                WNBStorage::log($task['id'], wnb_t('Dọn phần đã chép ở kho {dest}.', ['dest' => $to['name']]));
+                try {
+                    self::removeMovedData($to, $restic, $list);
+                } catch (Throwable $ignored) {
+                    WNBStorage::log($task['id'], $ignored->getMessage());
+                }
+                throw $e;
+            }
+        }
+
+        // Từ đây không dừng giữa chừng: bản ghi trỏ sang kho mới.
+        WNBShell::$guard = null;
+        WNBShell::$abort = null;
+        self::setTask($task['id'], ['no_cancel' => true]);
+        self::step($task, 88, 'Chuyển {n} bản sao lưu sang kho {dest}', ['n' => count($list), 'dest' => $to['name']]);
+        $ids = array_flip(array_column($list, 'id'));
+        WNBStorage::update('backups', function ($l) use ($ids, $from, $to, $preview) {
+            foreach ($l as &$b) {
+                if (isset($ids[$b['id']]) && ($b['destination_id'] ?? '') === $from['id']) {
+                    $path = $b['storage_path'] ?? '';
+                    $b = self::movedRecord($b, $to);
+                    if ($preview) {
+                        $b['storage_path'] = $path; // preview: dữ liệu giả lập không nằm trong kho
+                    }
+                }
+            }
+            return $l;
+        });
+        if ($restic) {
+            // Lịch bảo trì (prune/check) đi theo kho restic đã chép.
+            self::updateDestination($to['id'], ['restic_maint' => $from['restic_maint'] ?? []]);
+            self::updateDestination($from['id'], ['restic_maint' => []]);
+        }
+        $jobs = !empty($opt['jobs']) ? self::retargetDestination($from['id'], $to['id']) : 0;
+        if (!empty($opt['delete']) && !$preview) {
+            self::step($task, 92, 'Xóa dữ liệu đã chuyển khỏi kho cũ {dest}', ['dest' => $from['name']]);
+            try {
+                self::removeMovedData($from, $restic, $list);
+            } catch (Throwable $e) {
+                $warnings[] = WNBLang::msg('Không xóa được dữ liệu ở kho cũ {dest}, hãy xóa tay: {detail}', ['dest' => $from['name'], 'detail' => $e->getMessage()]);
+            }
+        }
+        $vars = ['n' => count($list), 'from' => $from['name'], 'to' => $to['name'], 'jobs' => $jobs];
+        return ['message' => WNBLang::msg($jobs ? 'Đã chuyển {n} bản sao lưu từ {from} sang {to}, {jobs} lịch chuyển sang dùng {to}.' : 'Đã chuyển {n} bản sao lưu từ {from} sang {to}.', $vars), 'warnings' => $warnings];
+    }
+
+    /** Lịch, kho snapshot và tác vụ sao lưu đang chờ của kho cũ chuyển sang kho mới. Trả về số lịch. */
+    public static function retargetDestination(string $from, string $to): int
+    {
+        $n = 0;
+        WNBStorage::update('jobs', function ($l) use ($from, $to, &$n) {
+            foreach ($l as &$j) {
+                if (($j['destination_id'] ?? '') === $from) {
+                    $j['destination_id'] = $to;
+                    $n++;
+                }
+            }
+            return $n ? $l : null;
+        });
+        if ((string)(WNBStorage::settings()['snapshot_destination'] ?? '') === $from) {
+            WNBStorage::update('settings', fn($s) => array_merge($s, ['snapshot_destination' => $to]));
+        }
+        WNBStorage::update('queue', function ($q) use ($from, $to) {
+            foreach ($q as &$t) {
+                if (($t['status'] ?? '') === 'pending' && in_array($t['type'] ?? '', ['backup', 'snapshot'], true) && ($t['destination_id'] ?? '') === $from) {
+                    $t['destination_id'] = $to;
+                }
+            }
+            return $q;
+        });
+        return $n;
+    }
+
+    /** Kho đích phải trống (kho restic: chỉ có kho rỗng plugin vừa khởi tạo). */
+    private static function assertMoveTargetEmpty(array $to, bool $restic): void
+    {
+        if ($to['type'] === 'local') {
+            $path = rtrim((string)$to['path'], '/');
+            self::mkdirSecure($path, 0711);
+            foreach (scandir($path) ?: [] as $e) {
+                // Thư mục ẩn (.staging, .downloads, .restic-cache) là vùng làm việc của plugin.
+                if ($e[0] !== '.') {
+                    throw new WNBError('Thư mục đích {path} không trống ({items}). Kho đích phải là thư mục trống.', ['path' => $path, 'items' => $e]);
+                }
+            }
+            return;
+        }
+        $base = WNBRclone::base($to);
+        if (WNBShell::run(WNBRclone::cmd('mkdir ' . escapeshellarg($base)), $out) !== 0
+            || WNBShell::run(WNBRclone::cmd('lsf ' . escapeshellarg($base) . ' --max-depth 1'), $out) !== 0) {
+            throw new WNBError('Không đọc được kho đích: {detail}', ['detail' => WNBShell::tail($out, 2)]);
+        }
+        $items = array_values(array_filter(array_map('trim', $out), 'strlen'));
+        if ($restic && in_array('restic/', $items, true)) {
+            $items = array_values(array_diff($items, ['restic/']));
+            $code = WNBShell::run(WNBRestic::cmd($to, 'snapshots --json --no-lock'), $snap);
+            $raw = implode("\n", $snap);
+            $start = strpos($raw, '[');
+            $snaps = ($code === 0 && $start !== false) ? json_decode(substr($raw, $start), true) : null;
+            if (!is_array($snaps)) {
+                throw new WNBError('Không đọc được kho restic đích: {detail}', ['detail' => WNBShell::tail($snap, 2)]);
+            }
+            if ($snaps) {
+                throw new WNBError('Kho restic đích đã có {n} snapshot. Kho đích phải là kho mới, trống.', ['n' => count($snaps)]);
+            }
+        }
+        if ($items) {
+            throw new WNBError('Thư mục đích {path} không trống ({items}). Kho đích phải là thư mục trống.', ['path' => $base, 'items' => implode(', ', array_slice($items, 0, 5))]);
+        }
+    }
+
+    /** Tiến độ chép của rclone (--stats-one-line): "1.2 GiB / 5 GiB, 24%, ...". */
+    private static function rcloneProgress(array $task, string $dest): callable
+    {
+        return function (string $log) use ($task, $dest) {
+            $m = null;
+            foreach (preg_split('/[\r\n]+/', WNBShell::tailFile($log, 4096)) as $line) {
+                if (preg_match('#([\d.]+ ?\w*B)\s*/\s*([\d.]+ ?\w*B),\s*(\d+)%#', $line, $x)) {
+                    $m = $x;
+                }
+            }
+            if ($m) {
+                $vars = ['dest' => $dest, 'done' => $m[1], 'total' => $m[2], 'pct' => (int)$m[3]];
+                self::setTask($task['id'], ['progress' => 10 + (int)(65 * min(100, (int)$m[3]) / 100), 'message' => WNBLang::msg('Chép sang {dest}: {done} / {total} ({pct}%)', $vars)]);
+            }
+        };
+    }
+
+    private const MOVE_COPY_FLAGS = ' --transfers 8 --checkers 16 --stats 10s --stats-one-line --stats-log-level NOTICE';
+
+    /** Bộ lọc rclone chỉ gồm thư mục <user>/<id> của các bản được chuyển. */
+    private static function moveFilter(array $list): string
+    {
+        $file = WNBStorage::path('tmp/move_' . bin2hex(random_bytes(6)) . '.filter');
+        $lines = array_map(fn($b) => '+ /' . $b['username'] . '/' . $b['id'] . '/**', $list);
+        $lines[] = '- **';
+        file_put_contents($file, implode("\n", $lines) . "\n");
+        return $file;
+    }
+
+    /** Kho Nén/Thư mục/ổ cứng: chép các thư mục <user>/<id> rồi so lại từng file (tên + dung lượng). */
+    private static function moveFiles(array $task, array $from, array $to, array $list): void
+    {
+        $src = self::moveRoot($from);
+        $dst = self::moveRoot($to);
+        $prefix = WNBShell::lowPriorityPrefix();
+        if ($to['type'] === 'local') {
+            // Thư mục <user> chỉ root vào được (rclone tạo thư mục 0755): bản sao lưu không lộ cho tài khoản khác.
+            foreach (array_unique(array_column($list, 'username')) as $u) {
+                self::mkdirSecure($dst . '/' . $u, 0700);
+            }
+        }
+        if ($from['type'] === 'local' && $to['type'] === 'local') {
+            // Giữ hardlink giữa các bản (rclone sẽ chép thành file riêng, tốn gấp nhiều lần dung lượng).
+            $files = WNBStorage::path('tmp/move_' . bin2hex(random_bytes(6)) . '.list');
+            file_put_contents($files, implode("\n", array_map(fn($b) => $b['username'] . '/' . $b['id'], $list)) . "\n");
+            try {
+                self::step($task, 10, 'Chép dữ liệu sang {dest}', ['dest' => $to['name']]);
+                $code = WNBShell::runWatch(sprintf('%srsync -aHr%s --files-from=%s %s %s', $prefix, self::rsyncProgressFlag(), escapeshellarg($files), escapeshellarg($src . '/'), escapeshellarg($dst . '/')),
+                    $out, function (string $log) use ($task, $to) {
+                        $pct = null;
+                        foreach (preg_split('/[\r\n]+/', WNBShell::tailFile($log, 2048)) as $line) {
+                            if (preg_match('/^\s*[\d,.]+\s+(\d+)%/', $line, $m)) {
+                                $pct = (int)$m[1];
+                            }
+                        }
+                        if ($pct !== null) {
+                            self::setTask($task['id'], ['progress' => 10 + (int)(65 * min(100, $pct) / 100), 'message' => WNBLang::msg('Chép dữ liệu sang {dest}: {pct}%', ['dest' => $to['name'], 'pct' => $pct])]);
+                        }
+                    });
+                if ($code !== 0) {
+                    throw new WNBError('Chép dữ liệu sang kho {dest} thất bại: {detail}', ['dest' => $to['name'], 'detail' => WNBShell::tail(array_filter($out, fn($l) => !preg_match('/^\s*[\d,.]+\s+\d+%/', $l)), 3)]);
+                }
+                self::step($task, 78, 'Kiểm tra dữ liệu đã chép sang {dest}', ['dest' => $to['name']]);
+                // Chạy thử: còn file nào thiếu hoặc khác dung lượng thì rsync in ra tên file.
+                $code = WNBShell::run(sprintf('rsync -rlHn --size-only --out-format=%s --files-from=%s %s %s', escapeshellarg('%n'), escapeshellarg($files), escapeshellarg($src . '/'), escapeshellarg($dst . '/')), $out);
+                $diff = array_values(array_filter($out, fn($l) => $l !== '' && substr($l, -1) !== '/'));
+                if ($code !== 0 || $diff) {
+                    throw new WNBError('Dữ liệu ở kho {dest} không khớp với kho cũ: {detail}', ['dest' => $to['name'], 'detail' => WNBShell::tail($diff ?: $out, 3)]);
+                }
+            } finally {
+                @unlink($files);
+            }
+            return;
+        }
+        $filter = self::moveFilter($list);
+        try {
+            self::step($task, 10, 'Chép dữ liệu sang {dest}', ['dest' => $to['name']]);
+            $flags = ' --filter-from ' . escapeshellarg($filter);
+            $code = WNBShell::runWatch($prefix . WNBRclone::cmd('copy ' . escapeshellarg($src) . ' ' . escapeshellarg($dst) . $flags . self::MOVE_COPY_FLAGS, true), $out, self::rcloneProgress($task, $to['name']));
+            if ($code !== 0) {
+                throw new WNBError('Chép dữ liệu sang kho {dest} thất bại: {detail}', ['dest' => $to['name'], 'detail' => WNBShell::tail($out, 3)]);
+            }
+            self::step($task, 78, 'Kiểm tra dữ liệu đã chép sang {dest}', ['dest' => $to['name']]);
+            $code = WNBShell::run($prefix . WNBRclone::cmd('check ' . escapeshellarg($src) . ' ' . escapeshellarg($dst) . $flags . ' --one-way --size-only --checkers 16'), $out);
+            if ($code !== 0) {
+                throw new WNBError('Dữ liệu ở kho {dest} không khớp với kho cũ: {detail}', ['dest' => $to['name'], 'detail' => WNBShell::tail($out, 3)]);
+            }
+        } finally {
+            @unlink($filter);
+        }
+    }
+
+    /**
+     * Kho restic: chép nguyên kho (thư mục restic/) thay cho kho rỗng ở kho đích, kho đích dùng mật khẩu của kho cũ,
+     * rồi mở kho đích kiểm tra đủ mọi snapshot của các bản sao lưu.
+     */
+    private static function moveResticRepo(array $task, array $from, array $to, array $list): void
+    {
+        $src = WNBRclone::join(WNBRclone::base($from), 'restic');
+        $dst = WNBRclone::join(WNBRclone::base($to), 'restic');
+        $prefix = WNBShell::lowPriorityPrefix();
+        // Khóa bỏ lại của tiến trình đã chết sẽ đi theo bản chép và chặn kho mới.
+        WNBShell::run(WNBRestic::cmd($from, 'unlock'));
+        $oldKey = WNBRestic::password($to['id']);
+        try {
+            self::step($task, 8, 'Gỡ kho restic rỗng ở {dest}', ['dest' => $to['name']]);
+            if (WNBShell::run(WNBRclone::cmd('purge ' . escapeshellarg($dst)), $out) !== 0 && !preg_match('/not found|doesn\'t exist|does not exist/i', implode("\n", $out))) {
+                throw new WNBError('Không gỡ được kho restic rỗng ở {dest}: {detail}', ['dest' => $to['name'], 'detail' => WNBShell::tail($out, 2)]);
+            }
+            self::step($task, 10, 'Chép dữ liệu sang {dest}', ['dest' => $to['name']]);
+            $code = WNBShell::runWatch($prefix . WNBRclone::cmd('copy ' . escapeshellarg($src) . ' ' . escapeshellarg($dst) . self::MOVE_COPY_FLAGS, true), $out, self::rcloneProgress($task, $to['name']));
+            if ($code !== 0) {
+                throw new WNBError('Chép dữ liệu sang kho {dest} thất bại: {detail}', ['dest' => $to['name'], 'detail' => WNBShell::tail($out, 3)]);
+            }
+            self::step($task, 78, 'Kiểm tra dữ liệu đã chép sang {dest}', ['dest' => $to['name']]);
+            if (WNBShell::run($prefix . WNBRclone::cmd('check ' . escapeshellarg($src) . ' ' . escapeshellarg($dst) . ' --one-way --size-only --checkers 16'), $out) !== 0) {
+                throw new WNBError('Dữ liệu ở kho {dest} không khớp với kho cũ: {detail}', ['dest' => $to['name'], 'detail' => WNBShell::tail($out, 3)]);
+            }
+            WNBRestic::setPassword($to['id'], WNBRestic::password($from['id']));
+            $code = WNBShell::run(WNBRestic::cmd($to, 'snapshots --json --no-lock'), $out);
+            $raw = implode("\n", $out);
+            $start = strpos($raw, '[');
+            $snaps = ($code === 0 && $start !== false) ? json_decode(substr($raw, $start), true) : null;
+            if (!is_array($snaps)) {
+                throw new WNBError('Không mở được kho restic đã chép sang {dest}: {detail}', ['dest' => $to['name'], 'detail' => WNBShell::tail($out, 2)]);
+            }
+            $have = [];
+            foreach ($snaps as $s) {
+                $have[(string)($s['id'] ?? '')] = true;
+                $have[(string)($s['short_id'] ?? '')] = true;
+            }
+            foreach ($list as $b) {
+                foreach (WNBRestic::snapshotIds($b) as $sid) {
+                    if (!isset($have[(string)$sid])) {
+                        throw new WNBError('Kho restic ở {dest} thiếu snapshot {id} của bản {backup}.', ['dest' => $to['name'], 'id' => $sid, 'backup' => $b['id']]);
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            if ($oldKey !== '') {
+                WNBRestic::setPassword($to['id'], $oldKey);
+            }
+            throw $e;
+        }
+    }
+
+    /** Xóa dữ liệu của các bản đã chuyển khỏi một kho (kho cũ sau khi chuyển xong, hoặc phần chép dở ở kho mới). */
+    private static function removeMovedData(array $dest, bool $restic, array $list): void
+    {
+        if ($restic) {
+            $dir = WNBRclone::join(WNBRclone::base($dest), 'restic');
+            if (WNBShell::run(WNBRclone::cmd('purge ' . escapeshellarg($dir)), $out) !== 0 && !preg_match('/not found|doesn\'t exist|does not exist/i', implode("\n", $out))) {
+                throw new WNBError('{detail}', ['detail' => WNBShell::tail($out, 2)]);
+            }
+            return;
+        }
+        if ($dest['type'] === 'local') {
+            $root = rtrim((string)$dest['path'], '/');
+            foreach ($list as $b) {
+                $path = $root . '/' . $b['username'] . '/' . $b['id'];
+                if (!is_link($root . '/' . $b['username']) && !is_link($path)) {
+                    self::rmrf($path);
+                    @rmdir($root . '/' . $b['username']); // chỉ xóa được khi đã trống
+                }
+            }
+            return;
+        }
+        $filter = self::moveFilter($list);
+        try {
+            $base = WNBRclone::base($dest);
+            if (WNBShell::run(WNBRclone::cmd('delete ' . escapeshellarg($base) . ' --filter-from ' . escapeshellarg($filter) . ' --checkers 16'), $out) !== 0) {
+                throw new WNBError('{detail}', ['detail' => WNBShell::tail($out, 2)]);
+            }
+            WNBShell::run(WNBRclone::cmd('rmdirs ' . escapeshellarg($base) . ' --leave-root'));
+        } finally {
+            @unlink($filter);
+        }
     }
 
     /* ============================== Lịch tự động ============================== */

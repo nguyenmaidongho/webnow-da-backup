@@ -194,4 +194,5 @@ require __DIR__ . "/api_test8.php";
 require __DIR__ . "/api_test9.php";
 require __DIR__ . "/api_test10.php";
 require __DIR__ . "/api_test11.php";
+require __DIR__ . "/api_test12.php";
 echo "PASS: $pass  FAIL: $fail\n";

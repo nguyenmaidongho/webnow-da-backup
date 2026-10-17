@@ -2,7 +2,7 @@
 
 Plugin sao lưu và khôi phục cho **DirectAdmin** (giao diện Evolution, sáng/tối), dùng được ở cả ba cấp **Admin, Reseller và User**. Sao lưu lên ổ cứng máy chủ hoặc lên cloud (S3, R2, B2, Google Drive, OneDrive…). Mã hóa và incremental bằng restic, khôi phục được từng file. Song ngữ Tiếng Việt / English.
 
-Phiên bản hiện tại: **2.5.1** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
+Phiên bản hiện tại: **2.6.0** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đã chạy trên 1.671)
 
 ---
 
@@ -23,6 +23,7 @@ Phiên bản hiện tại: **2.5.1** · PHP 7.4 – 8.5 · DirectAdmin 1.6x (đ�
 - **Kho restic**: mỗi kho có mật khẩu riêng (plugin tự tạo, admin xem và cất giữ được). **Mất mật khẩu là mất toàn bộ bản sao lưu trong kho.** Kho tự bảo trì: prune mỗi ngày, check mỗi tuần. Có nút **"Quét lại kho"** để nạp lại danh sách bản sao lưu sau khi cài lại máy chủ.
 - Sửa kho mà vị trí thay đổi thì plugin tự gỡ các bản cũ khỏi danh sách (không xóa dữ liệu ở vị trí cũ), tránh danh sách trỏ tới bản không còn.
 - **"Quét lại kho" cho mọi kiểu kho** (Incremental, Nén, Thư mục, ổ cứng máy chủ): cài lại máy chủ thì thêm lại kho với cùng vị trí rồi bấm Quét lại để nạp lại danh sách bản sao lưu. Kiểu Nén/Thư mục đọc `manifest.json` của từng bản, kể cả bản tạo bằng các phiên bản cũ.
+- **Chuyển kho** (nút ở bảng Kho lưu trữ): chuyển mọi bản sao lưu của một kho sang kho mới thêm, thư mục trống, ví dụ từ kho S3 nhỏ sang kho S3 lớn hơn, hoặc từ ổ cứng máy chủ lên cloud. Plugin chép dữ liệu, so lại từng file ở kho mới rồi mới chuyển danh sách, nên chủ sở hữu, lịch và nhãn giữ bản giữ nguyên (khách vẫn thấy bản của mình). Tùy chọn: lịch và snapshot từ nay lưu vào kho mới, xóa dữ liệu ở kho cũ sau khi kiểm tra xong. Lỗi hoặc bấm Dừng trong lúc chép thì phần đã chép ở kho mới được dọn, kho cũ không bị đụng tới. Trong lúc chuyển, các tác vụ khác của hai kho tự đợi. Kho restic chuyển nguyên kho (cùng mật khẩu) sang kho restic mới.
 - **Loại trừ đường dẫn** (Cài đặt): mỗi dòng một mẫu tính từ home, ví dụ `lscache/*`. Mẫu bắt đầu bằng `**/` khớp ở mọi cấp thư mục, ví dụ `**/node_modules`.
 - **Tài khoản nhiều database dump nhanh**: database được `mysqldump` song song (4 luồng). Với kho restic, các database nhỏ được gom theo lô, mỗi lô một snapshot, thay vì mỗi database một lần gọi restic. Database lớn vẫn dump thẳng vào restic. Tài khoản 1200 database không còn mất hàng giờ.
 - Giới hạn băng thông tải lên (`bwlimit`); tiến trình sao lưu chạy với `nice`/`ionice` để không làm chậm web của khách.
@@ -146,7 +147,7 @@ php -n tests/seed.php && php -S 127.0.0.1:8088 router.php
 
 Mở `http://127.0.0.1:8088/?role=admin` (hoặc `reseller`, `user`). Thêm `&theme=dark` để xem giao diện tối, `&iframe=flex` để giả lập khung của DirectAdmin.
 
-Chạy test (406 kiểm tra, PHP 7.4 và 8.5, xem thêm [tests/README.md](tests/README.md)):
+Chạy test (443 kiểm tra, PHP 7.4 và 8.5, xem thêm [tests/README.md](tests/README.md)):
 
 ```bash
 rm -rf data && php -n tests/api_test.php
@@ -166,5 +167,6 @@ node tests/jskeys.js assets/app.js assets/lang-en.js && php -n tests/phpkeys.php
 - Plugin không tự tạo lại subdomain, domain pointer và SSL. Danh sách được ghi trong bản sao lưu để làm theo.
 - Database được import lại nội dung, nhưng **chưa sao lưu user/quyền MySQL**. Nếu database đã bị xóa, cần gán lại user database trong DirectAdmin.
 - Kho cloud kiểu **Nén** và **Thư mục** lưu mỗi bản đầy đủ (chỉ restic là incremental). Hãy đặt số bản giữ lại phù hợp.
+- **Chuyển kho**: kho đích phải là kho mới (chưa có bản sao lưu, thư mục trống) và cùng cách lưu (restic sang restic; Nén/Thư mục sang Nén/Thư mục hoặc ổ cứng). Kho có cả bản restic lẫn bản Nén/Thư mục chưa chuyển được. Chuyển từ ổ cứng máy chủ lên cloud thì các file dùng chung giữa các bản (hardlink) được tải lên thành file riêng, tốn dung lượng như bản đầy đủ.
 - Bản kiểu Nén: khôi phục một file phải tải (stream) cả bản nén home của tài khoản từ cloud.
 - Giám sát chạy trong cron của plugin. Nếu cron hỏng thì không gửi được cảnh báo (banner trong giao diện vẫn hiện).

@@ -490,11 +490,12 @@
             case 'maintain': return t('Bảo trì kho');
             case 'rescan': return t('Quét lại kho');
             case 'cleanup': return t('Dọn bản mồ côi');
+            case 'move': return t('Chuyển kho');
         }
         return x.type;
     }
     function taskIcon(x) {
-        return { backup: 'archive', snapshot: 'camera', restore: 'restore', download: 'download', delete: 'trash', maintain: 'shield', rescan: 'refresh', cleanup: 'trash' }[x.type] || 'activity';
+        return { backup: 'archive', snapshot: 'camera', restore: 'restore', download: 'download', delete: 'trash', maintain: 'shield', rescan: 'refresh', cleanup: 'trash', move: 'move' }[x.type] || 'activity';
     }
     function statusBadge(x) {
         if (x.status === 'running' && x.cancel_by) return '<span class="badge warn run"><span class="dot"></span>' + esc(t('Đang dừng…')) + '</span>';
@@ -511,7 +512,7 @@
     /** Nút Dừng: admin dừng mọi tác vụ; reseller/user chỉ tác vụ chính họ tạo. Tác vụ xóa đang chạy không dừng giữa chừng. */
     function canCancel(x) {
         if (!isActive(x) || x.cancel_by) return false;
-        if (x.status === 'running' && (x.type === 'delete' || x.type === 'cleanup')) return false;
+        if (x.status === 'running' && (x.type === 'delete' || x.type === 'cleanup' || x.no_cancel)) return false;
         return ROLE === 'admin' || x.initiated_by === S.me.user;
     }
     function scheduleText(j) {
@@ -531,6 +532,8 @@
         return u ? t('Tất cả, trừ {n} tài khoản', { n: u }) : t('Tất cả tài khoản');
     }
     function destName(id) { var d = byId(id, S.destinations); return d ? nameOf(d.name) : t('(đã xóa)'); }
+    /** Tài khoản của tác vụ, hoặc kho với tác vụ hệ thống (chuyển kho: kho cũ → kho mới). */
+    function taskTarget(x) { return x.username || (x.type === 'move' ? destName(x.destination_id) + ' → ' + destName(x.target_id) : destName(x.destination_id)); }
     function backupsOf(u) { return S.backups.filter(function (b) { return b.username === u; }); }
     function switchHTML(attrs, checked, label) {
         return '<label class="switch"><input type="checkbox" ' + attrs + (checked ? ' checked' : '') + '><span class="track"></span>' + (label ? '<span class="switch-label">' + label + '</span>' : '') + '</label>';
@@ -996,6 +999,7 @@
     };
 
     function viewDestinations() {
+        var counts = destCounts();
         var rows = S.destinations.map(function (d) {
             var ty = DEST_TYPES[d.type] || { label: d.type, icon: 'cloud' };
             var where = d.type === 'local' ? d.path : d.subpath + (d.account ? ' · ' + d.account : '');
@@ -1003,10 +1007,12 @@
             var maint = d.format === 'restic' ? (mt.prune_ts ? '<div class="cell-sub">' + esc(t('Dọn kho {when}', { when: fmtRel(new Date(mt.prune_ts * 1000).toISOString().slice(0, 19).replace('T', ' ')) })) + '</div>' : '') +
                 ((mt.check_ok === false || mt.prune_ok === false) ? ' <span class="badge bad" title="' + esc(mt.check_msg || mt.prune_msg || '') + '">' + esc(t('Kho có lỗi')) + '</span>' : '') : '';
             var test = d.last_test ? '<span class="badge ' + (d.last_test.ok ? 'ok' : 'bad') + '" title="' + esc(d.last_test.message) + '">' + esc(d.last_test.ok ? t('Kết nối tốt') : t('Lỗi kết nối')) + '</span><div class="cell-sub">' + esc(fmtRel(d.last_test.at)) + '</div>' : '<span class="muted">' + esc(t('Chưa kiểm tra')) + '</span>';
-            return '<tr><td><div class="row"><div class="list-icon">' + ic(ty.icon) + '</div><div><div class="cell-main">' + esc(nameOf(d.name)) + '</div><div class="cell-sub mono">' + esc(where) + '</div></div></div></td>' +
+            return '<tr><td><div class="row"><div class="list-icon">' + ic(ty.icon) + '</div><div><div class="cell-main">' + esc(nameOf(d.name)) + '</div><div class="cell-sub mono">' + esc(where) + '</div>' +
+                (counts[d.id] ? '<div class="cell-sub">' + esc(t('{n} bản sao lưu · {size}', { n: counts[d.id].n, size: fmtMb(counts[d.id].mb) })) + '</div>' : '') + '</div></div></td>' +
                 '<td class="hide-sm">' + esc(t(ty.label)) + '<div class="cell-sub">' + esc(formatLabel(d)) + '</div>' + maint + '</td><td class="num">' + (d.free_gb !== null && d.free_gb !== undefined ? esc(d.free_gb) + ' GB' : '—') + '</td><td>' + test + '</td>' +
                 '<td class="actions"><button class="btn btn-sm" data-act="dest-test" data-id="' + esc(d.id) + '">' + ic('check') + esc(t('Kiểm tra')) + '</button>' +
                 (d.format === 'restic' && d.restic_key ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-key" data-id="' + esc(d.id) + '" title="' + esc(t('Mật khẩu kho restic')) + '" aria-label="' + esc(t('Mật khẩu kho restic')) + '">' + ic('shield') + '</button>' : '') +
+                (counts[d.id] ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-move" data-id="' + esc(d.id) + '" title="' + esc(t('Chuyển kho')) + '" aria-label="' + esc(t('Chuyển kho')) + '">' + ic('move') + '</button>' : '') +
                 (d.format !== 'restic' || d.restic_key ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-rescan" data-id="' + esc(d.id) + '" title="' + esc(t('Quét lại kho')) + '" aria-label="' + esc(t('Quét lại kho')) + '">' + ic('refresh') + '</button>' : '') +
                 '<button class="btn btn-sm btn-ghost btn-icon" data-act="dest-edit" data-id="' + esc(d.id) + '" aria-label="' + esc(t('Sửa')) + '">' + ic('edit') + '</button>' +
                 (d.id !== 'dest_local' ? '<button class="btn btn-sm btn-ghost btn-icon danger" data-act="dest-delete" data-id="' + esc(d.id) + '" aria-label="' + esc(t('Xóa')) + '">' + ic('trash') + '</button>' : '') + '</td></tr>';
@@ -1107,6 +1113,64 @@
         if (d.type === 'local') return t('Incremental (hardlink)');
         if (d.format === 'restic') return t('Incremental (restic)');
         return d.format === 'archive' ? t('Nén') : t('Thư mục');
+    }
+    /** Số bản sao lưu, dung lượng và kiểu bản theo kho. */
+    function destCounts() {
+        var c = {};
+        S.backups.forEach(function (b) {
+            var x = c[b.destination_id] || (c[b.destination_id] = { n: 0, mb: 0, restic: 0, archive: 0 });
+            x.n++;
+            x.mb += +b.size_mb || 0;
+            if (b.format === 'restic') x.restic++;
+            if (b.format === 'archive') x.archive++;
+        });
+        return c;
+    }
+    /** Vì sao kho to không nhận được bản của kho from (khớp WNBEngine::moveProblem); '' = được. */
+    function moveBlock(from, to, counts) {
+        var c = counts[from.id] || {};
+        if (counts[to.id]) return t('đã có bản sao lưu');
+        if (c.restic && to.format !== 'restic') return t('cần kho kiểu Incremental (restic)');
+        if (!c.restic && to.format === 'restic') return t('kho restic không nhận bản Nén/Thư mục');
+        if (c.archive && to.type === 'local') return t('bản Nén chỉ chuyển sang kho cloud');
+        return '';
+    }
+    function moveForm(d) {
+        if (!d) return;
+        var counts = destCounts(), c = counts[d.id] || { n: 0, mb: 0 };
+        var others = S.destinations.filter(function (x) { return x.id !== d.id; });
+        var ok = others.filter(function (x) { return !moveBlock(d, x, counts); });
+        var opts = others.map(function (x) {
+            var why = moveBlock(d, x, counts);
+            return '<option value="' + esc(x.id) + '"' + (why ? ' disabled' : '') + '>' + esc(nameOf(x.name) + ' · ' + formatLabel(x) + (why ? ' (' + why + ')' : '')) + '</option>';
+        }).join('');
+        var jobs = (S.jobs || []).filter(function (j) { return j.destination_id === d.id; }).length;
+        var snap = S.settings && S.settings.snapshot_destination === d.id;
+        var uses = [];
+        if (jobs) uses.push(t('{n} lịch', { n: jobs }));
+        if (snap) uses.push(t('snapshot'));
+        var body = '<div class="banner info" style="margin:0 0 14px">' + ic('info', 'i-lg') + '<div>' + esc(t('Chép {n} bản sao lưu ({size}) sang kho mới, so lại từng file rồi mới chuyển danh sách. Chủ sở hữu, lịch và nhãn giữ bản giữ nguyên nên khách vẫn thấy bản của mình.', { n: c.n, size: fmtMb(c.mb) })) + '</div></div>' +
+            (ok.length ? '' : '<div class="banner warn" style="margin:0 0 14px">' + ic('alert', 'i-lg') + '<div>' + esc(t('Chưa có kho đích phù hợp. Hãy thêm một kho mới (thư mục trống) kiểu {format} rồi quay lại.', { format: c.restic ? t('Incremental (restic)') : t('Nén hoặc Thư mục') })) + '</div></div>') +
+            '<form class="form-grid" data-form="move" autocomplete="off">' +
+            '<div class="field full"><label>' + esc(t('Chuyển sang kho')) + '</label><select class="select" name="target_id"' + (ok.length ? '' : ' disabled') + '>' + opts + '</select>' +
+            '<div class="hint">' + esc(t('Kho đích phải là kho mới thêm: chưa có bản sao lưu nào và thư mục trống.')) + '</div></div>' +
+            (uses.length ? '<div class="field full">' + switchHTML('name="jobs"', true, esc(t('Từ nay {what} lưu vào kho mới', { what: uses.join(' ' + t('và') + ' ') }))) + '</div>' : '') +
+            '<div class="field full">' + switchHTML('name="delete_source"', true, esc(t('Xóa dữ liệu ở kho cũ sau khi chép và kiểm tra xong'))) + '</div>' +
+            '</form><p class="muted small" style="margin:12px 0 0">' + esc(t('Trong lúc chuyển, sao lưu, khôi phục và tải về của hai kho sẽ đợi. Kho cũ vẫn còn trong danh sách (trống), bạn tự xóa khi không dùng nữa.')) + '</p>';
+        var m = openModal({
+            title: t('Chuyển kho'), sub: esc(nameOf(d.name)), body: body,
+            foot: '<button class="btn" data-close-m>' + esc(t('Hủy')) + '</button><button class="btn btn-primary" data-move' + (ok.length ? '' : ' disabled') + '>' + ic('move') + esc(t('Chuyển kho')) + '</button>'
+        });
+        m.el.querySelector('[data-close-m]').onclick = m.close;
+        var form = m.el.querySelector('form[data-form="move"]');
+        if (ok.length) form.target_id.value = ok[0].id;
+        m.el.querySelector('[data-move]').onclick = function () {
+            run(this, api('dest_move', {
+                id: d.id, target_id: form.target_id.value,
+                jobs: !form.jobs || form.jobs.checked ? '1' : '0',
+                delete_source: form.delete_source.checked ? '1' : '0'
+            })).then(m.close, function () {});
+        };
     }
     function destForm(dest) {
         var d = dest || { type: 'local', name: '', path: '', subpath: '', params: {}, format: S.engine.restic ? 'restic' : 'archive' };
@@ -1209,7 +1273,7 @@
                 var s = Math.max(0, Math.round((parseDate(x.finished_at) - parseDate(x.started_at)) / 1000));
                 dur = '<div class="cell-sub">' + esc(s < 60 ? t('{n} giây', { n: s }) : t('{n} phút', { n: Math.round(s / 60) })) + '</div>';
             }
-            return '<tr><td><div class="row"><div class="list-icon ' + (x.status === 'failed' ? 'bad' : x.status === 'completed' ? 'ok' : x.status === 'cancelled' ? '' : 'run') + '">' + ic(taskIcon(x)) + '</div><div><div class="cell-main">' + esc(taskLabel(x)) + '</div><div class="cell-sub">' + esc(x.username || destName(x.destination_id)) + (ROLE !== 'user' ? ' · ' + esc(t('bởi {who}', { who: x.initiated_by === 'cron' ? t('lịch tự động') : x.initiated_by })) : '') + '</div></div></div></td>' +
+            return '<tr><td><div class="row"><div class="list-icon ' + (x.status === 'failed' ? 'bad' : x.status === 'completed' ? 'ok' : x.status === 'cancelled' ? '' : 'run') + '">' + ic(taskIcon(x)) + '</div><div><div class="cell-main">' + esc(taskLabel(x)) + '</div><div class="cell-sub">' + esc(taskTarget(x)) + (ROLE !== 'user' ? ' · ' + esc(t('bởi {who}', { who: x.initiated_by === 'cron' ? t('lịch tự động') : x.initiated_by })) : '') + '</div></div></div></td>' +
                 '<td style="min-width:220px">' + statusBadge(x) + '<div class="cell-sub" style="margin-top:3px;max-width:520px;overflow-wrap:anywhere">' + esc(x.message) + '</div>' + progress + '</td>' +
                 '<td class="nowrap hide-sm">' + esc(fmtRel(x.created_at)) + dur + '</td>' +
                 '<td class="actions">' + (canCancel(x) ? '<button class="btn btn-sm btn-stop" data-act="task-cancel" data-id="' + esc(x.id) + '">' + ic('stop') + esc(t('Dừng')) + '</button>' : '') +
@@ -1640,8 +1704,9 @@
                 var note = tk.status === 'pending' ? t('Tác vụ đang chờ sẽ được bỏ khỏi hàng đợi.')
                     : tk.type === 'restore' ? t('Dữ liệu có thể mới được khôi phục một phần. Sau khi dừng, hãy khôi phục lại nếu cần.')
                         : (tk.type === 'backup' || tk.type === 'snapshot') ? t('Bản sao lưu dở dang sẽ bị xóa, các bản cũ không bị ảnh hưởng.')
+                            : tk.type === 'move' ? t('Phần đã chép sang kho mới sẽ được dọn, kho cũ và danh sách bản sao lưu giữ nguyên.')
                             : t('Lệnh đang chạy sẽ bị dừng ngay.');
-                confirmBox({ title: t('Dừng tác vụ?'), body: '<p><b>' + esc(taskLabel(tk)) + '</b> · ' + esc(tk.username || destName(tk.destination_id)) + '</p><p class="muted">' + esc(note) + '</p>', ok: t('Dừng'), danger: true })
+                confirmBox({ title: t('Dừng tác vụ?'), body: '<p><b>' + esc(taskLabel(tk)) + '</b> · ' + esc(taskTarget(tk)) + '</p><p class="muted">' + esc(note) + '</p>', ok: t('Dừng'), danger: true })
                     .then(function (ok) { if (ok) run(el, api('task_cancel', { task_id: d.id })); });
                 break;
             }
@@ -1675,6 +1740,9 @@
                 break;
             case 'dest-key':
                 showResticKey(d.id, false);
+                break;
+            case 'dest-move':
+                moveForm(byId(d.id, S.destinations));
                 break;
             case 'dest-rescan':
                 confirmBox({ title: t('Quét lại kho?'), body: '<p>' + esc(d.format === 'restic'

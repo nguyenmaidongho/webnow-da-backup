@@ -223,6 +223,28 @@ final class WNBApi
                 WNBEngine::kick();
                 return $done('Đang quét kho, danh sách bản sao lưu sẽ cập nhật khi xong.');
 
+            case 'dest_move':
+                // Chuyển mọi bản sao lưu của một kho sang kho mới (thư mục trống), vd từ kho S3 nhỏ sang kho lớn hơn.
+                self::requireAdmin($role);
+                $from = WNBEngine::findDestination($str('id'));
+                $to = WNBEngine::findDestination($str('target_id'));
+                if (!$from || !$to) {
+                    throw new WNBError('Kho lưu trữ không tồn tại.');
+                }
+                $moving = WNBEngine::movingDestinations();
+                if (isset($moving[$from['id']]) || isset($moving[$to['id']])) {
+                    throw new WNBError('Kho này đang được chuyển, hãy đợi tác vụ chuyển kho xong.');
+                }
+                $problem = WNBEngine::moveProblem($from, $to, WNBStorage::read('backups'));
+                if ($problem) {
+                    throw $problem;
+                }
+                $n = count(array_filter(WNBStorage::read('backups'), fn($b) => ($b['destination_id'] ?? '') === $from['id']));
+                WNBEngine::enqueue(['type' => 'move', 'username' => '', 'initiated_by' => $user, 'role' => $role, 'destination_id' => $from['id'], 'target_id' => $to['id'],
+                    'options' => ['jobs' => $str('jobs') === '1', 'delete' => $str('delete_source') === '1']]);
+                WNBEngine::kick();
+                return $done('Đang chuyển {n} bản sao lưu từ {from} sang {to}. Tác vụ khác của hai kho sẽ đợi chuyển xong.', ['n' => $n, 'from' => $from['name'], 'to' => $to['name']]);
+
             case 'dest_test':
                 self::requireAdmin($role);
                 $dest = WNBEngine::findDestination($str('id'));
@@ -243,6 +265,9 @@ final class WNBApi
                     if ($j['destination_id'] === $id) {
                         throw new WNBError('Lịch "{job}" đang dùng kho này.', ['job' => $j['name']]);
                     }
+                }
+                if (WNBEngine::destinationBusy($id)) {
+                    throw new WNBError('Kho đang có tác vụ chờ hoặc đang chạy, hãy đợi xong rồi xóa.');
                 }
                 $count = count(array_filter(WNBStorage::read('backups'), fn($b) => $b['destination_id'] === $id));
                 if ($count > 0) {

@@ -12,7 +12,7 @@
 
 define('WNB_ID', 'webnowbackup');
 define('WNB_NAME', 'WebNowBackup');
-define('WNB_VERSION', '2.5.1');
+define('WNB_VERSION', '2.6.0');
 define('WNB_ROOT', dirname(__DIR__));
 define('WNB_PLUGIN_DIR', '/usr/local/directadmin/plugins/' . WNB_ID);
 
